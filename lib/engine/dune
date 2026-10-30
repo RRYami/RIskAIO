@@ -1,0 +1,4 @@
+(library
+ (name risk_engine)
+ (public_name risk-ai.engine)
+ (libraries risk_core yojson lacaml))

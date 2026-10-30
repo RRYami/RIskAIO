@@ -1,0 +1,17 @@
+(executable
+ (name main)
+ (public_name risk-ai)
+ (libraries risk_core risk_engine yojson))
+
+(executable
+ (name perf)
+ (libraries risk_core risk_engine yojson unix))
+
+(executable
+ (name surface)
+ (libraries risk_core risk_engine yojson unix))
+
+
+(executable
+ (name dev)
+ (libraries risk_core risk_engine yojson unix))

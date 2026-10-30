@@ -1,0 +1,8 @@
+_build/
+*.install
+*.byte
+*.native
+fixtures/
+__pycache__/
+*.pyc
+.DS_Store
