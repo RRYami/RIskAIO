@@ -12,5 +12,6 @@
   (dune (>= 3.16))
   (yojson (>= 2.0))
   (lacaml (>= 11.0))
+  (zarith (>= 1.12))
   (alcotest (and (>= 1.8) :with-test))
   (ocamlformat (and (>= 0.27) :with-dev-setup))))

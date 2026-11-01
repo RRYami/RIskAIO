@@ -1,0 +1,4 @@
+(library
+ (name risk_db)
+ (public_name risk-ai.db)
+ (libraries risk_core))

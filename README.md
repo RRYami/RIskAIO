@@ -25,7 +25,10 @@ scripts live outside the repo.
 | S5 | latent PCA + joint equity/vol simulation (bootstrap + Gaussian) | done |
 | S6 | American engine: CRR-vs-BAW-vs-BS2002 shootout, BS-2002 wins | done |
 | — | `python/`: oracle/time scripts removed (out-of-repo); fixtures script kept | done |
-| P7 | zarith money, full taxonomy, API/worker/DB | planned |
+| P7a | zarith money (exact rational boundary, float64 core) | done |
+| P7b | full taxonomy (closed variant + terms validation) | planned |
+| P7c | Postgres read contract (`db/schema.sql`, `lib/db`, USD curves + dividends) | done |
+| P7d | API/worker/DB persistence | planned |
 
 Oracle parity: the P3–P5 cross-language goldens (`oracle_*.json`) are consumed
 as data and the gated tests skip when they are absent. The scripts that
@@ -38,7 +41,7 @@ export PATH="$HOME/.local/bin:$PATH"   # opam lives here
 make switch   # one-time: opam switch create 5.3.0 (compiles OCaml, ~10 min)
 make deps     # dune, alcotest, yojson, ocamlformat, lacaml
 make build
-make test     # full suite: 58 tests across 4 binaries (no Python needed)
+make test     # full suite: 73 tests across 4 binaries (no Python needed)
 make parity   # fixtures + full suite with fixture-gated tests + engine check
 make perf-big # scaled probe: ~2000 positions (see PERF.md)
 ```
@@ -50,6 +53,8 @@ lib/core/    money, calendar, currencies, refdata, marketdata, holdings, csv
 lib/engine/  config, stats, options, market, pricing, run, backtest,
              ssvi, surface_constraints, quotes, optim, ssvi_calibration,
              pca_latent
+lib/db/      Postgres read contract: v_* views → Marketdata.bundle (no DB dep)
+db/          schema.sql: market_* tables + v_* contract views (Postgres)
 bin/         risk-ai (check | parity), perf, surface (calibrate|recanon|run),
              dev (book | price | bench-run — playground, non-production)
 test/        alcotest suites: unit goldens, scipy cross-check, validator
@@ -79,8 +84,9 @@ and peak RSS, so repricing cost and allocation churn are visible per change.
   stays `float array array` with fixed-order loops (ADR-007 chunk-independence).
 * **RNG is SplitMix64, not PCG64**: MC draws match in distribution, not
   bit-for-bit (tolerance-OK, agreed). Draw order mirrors `mc_shocks`.
-* **Money is text+float, not Decimal**: full precision via zarith is P7.
-  Float ingress is unrepresentable (type system); `erf`/`ndtr` are stdlib-only
+* **Money is exact at the boundary, float64 in the core**: `Money.t` holds
+  an exact rational plus its float image; quantization is exact half-up.
+  Float ingress stays unrepresentable; `erf`/`ndtr` are stdlib-only
   (~1e-15, tested against published CDF goldens).
 * **Zero covariance** repairs to ~zero and reports `repaired=true` instead of
   raising like numpy's Cholesky.

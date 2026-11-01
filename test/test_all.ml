@@ -44,6 +44,14 @@ let test_money_quantize () =
   Alcotest.check Alcotest.string "zero-places" "3" (q "2.5" 0);
   Alcotest.check Alcotest.string "neg-half" "-3" (q "-2.5" 0)
 
+let test_money_exact () =
+  (* 0.1 + 0.2 is not representable in binary float; the exact sum is 0.3. *)
+  let a = Money.decimal_of_string "0.1" and b = Money.decimal_of_string "0.2" in
+  Alcotest.check Alcotest.string "exact-sum" "3/10"
+    (Q.to_string (Money.sum_exact [ a; b ]));
+  Alcotest.check Alcotest.string "exact-value" "1/40"
+    (Q.to_string (Money.exact_of (Money.decimal_of_string "0.025")))
+
 (* --- calendar --- *)
 
 let d = Calendar.of_string
@@ -327,6 +335,77 @@ let test_fixtures () =
       Alcotest.check Alcotest.bool "prices-nonempty" true (bundle.prices <> []);
       Alcotest.check Alcotest.bool "fx-nonempty" true (bundle.fx <> []);
       Alcotest.check Alcotest.bool "curves-nonempty" true (bundle.curves <> [])
+
+(* --- db read contract (P7.3, no Postgres needed) --- *)
+
+let db_curve_tuples () =
+  List.concat_map
+    (fun date ->
+      List.mapi
+        (fun i (tenor, ty) ->
+          {
+            Risk_db.Db.date;
+            currency = "USD";
+            tenor;
+            tenor_years = ty;
+            zero_rate = 0.03 +. (float_of_int i *. 0.001);
+          })
+        Marketdata.tenors)
+    [ "2024-08-21"; "2024-08-22" ]
+
+let db_test_bundle () =
+  Risk_db.Db.bundle_of_tuples
+    ~prices:
+      [
+        {
+          Risk_db.Db.instrument_id = "EQ1";
+          date = "2024-08-21";
+          close = "100.00";
+          currency = "USD";
+        };
+        {
+          Risk_db.Db.instrument_id = "EQ1";
+          date = "2024-08-22";
+          close = "101.00";
+          currency = "USD";
+        };
+      ]
+    ~fx:
+      [
+        { Risk_db.Db.date = "2024-08-21"; currency = "USD"; rate_to_eur = "0.9" };
+        { Risk_db.Db.date = "2024-08-22"; currency = "USD"; rate_to_eur = "0.9" };
+      ]
+    ~curves:(db_curve_tuples ())
+    ~vols:[ { Risk_db.Db.instrument_id = "EQ1"; atm_vol_30d = 0.2 } ]
+    ~spreads:[ { Risk_db.Db.instrument_id = "EQ1"; spread = 0.01 } ]
+    ~dividends:[ { Risk_db.Db.instrument_id = "EQ1"; dividend_yield = 0.015 } ]
+
+let test_db_contract_ok () =
+  let bundle = db_test_bundle () in
+  let as_of = Calendar.of_string "2024-08-22" in
+  let state = Market.market_state bundle as_of in
+  let usd = List.assoc "USD" state.Market.curves in
+  Alcotest.check Alcotest.bool "usd-sloped" true
+    (usd.(0) < usd.(Array.length usd - 1));
+  Alcotest.check eps "dividend" 0.015 (List.assoc "EQ1" state.Market.dividends);
+  Alcotest.check eps "close-exact" 101.0
+    (Money.float_of
+       (List.find
+          (fun (r : Marketdata.price_row) -> Calendar.equal r.date as_of)
+          bundle.Marketdata.prices)
+         .close)
+
+let test_db_contract_grid_reject () =
+  let curves = List.tl (db_curve_tuples ()) in
+  match
+    try
+      Some
+        (Risk_db.Db.bundle_of_tuples ~prices:[] ~fx:[] ~curves ~vols:[]
+           ~spreads:[] ~dividends:[])
+    with Invalid_argument _ -> None
+  with
+  | None -> ()
+  | Some _ -> Alcotest.fail "accepted gappy curve grid"
 
 (* --- csv --- *)
 
@@ -1407,6 +1486,7 @@ let () =
           Alcotest.test_case "parse" `Quick test_money_parse;
           Alcotest.test_case "rejects" `Quick test_money_rejects;
           Alcotest.test_case "quantize" `Quick test_money_quantize;
+          Alcotest.test_case "exact" `Quick test_money_exact;
         ] );
       ( "calendar",
         [
@@ -1438,6 +1518,11 @@ let () =
           Alcotest.test_case "vol-compat" `Quick test_config_vol_compat;
         ] );
       ("fixtures", [ Alcotest.test_case "load" `Quick test_fixtures ]);
+      ( "db",
+        [
+          Alcotest.test_case "contract-ok" `Quick test_db_contract_ok;
+          Alcotest.test_case "grid-reject" `Quick test_db_contract_grid_reject;
+        ] );
       ( "csv",
         [
           Alcotest.test_case "basic" `Quick test_csv_basic;

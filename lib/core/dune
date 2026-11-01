@@ -1,4 +1,4 @@
 (library
  (name risk_core)
  (public_name risk-ai.core)
- (libraries yojson))
+ (libraries yojson zarith))
