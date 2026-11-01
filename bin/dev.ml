@@ -3,16 +3,14 @@
     Non-production diagnostic tool (no stability promises, Linux-leaning for
     peak-RSS reads). Subcommands:
 
-      book --fixture DIR
-        Position table, factor inventory, base values, NAV.
-      price --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N]
-        One-position shock lab: base vs shocked value plus bump Greeks.
-      bench-run --fixture DIR [--mc N]
-        run_engine stages with per-stage timing, Gc allocation deltas and
-        peak RSS (VmHWM).
+    book --fixture DIR Position table, factor inventory, base values, NAV. price
+    --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N]
+    One-position shock lab: base vs shocked value plus bump Greeks. bench-run
+    --fixture DIR [--mc N] run_engine stages with per-stage timing, Gc
+    allocation deltas and peak RSS (VmHWM).
 
-    Memory numbers come from [Gc.stat]/[Gc.allocated_bytes] (words are
-    8 bytes on 64-bit) plus VmHWM from /proc/self/status. *)
+    Memory numbers come from [Gc.stat]/[Gc.allocated_bytes] (words are 8 bytes
+    on 64-bit) plus VmHWM from /proc/self/status. *)
 
 open Risk_core
 open Risk_engine
@@ -23,11 +21,13 @@ let load_fixture dir =
   let read name = Yojson.Basic.from_file (Filename.concat dir name) in
   let manifest = read "manifest.json" in
   let open Yojson.Basic.Util in
-  let as_of =
-    manifest |> member "as_of" |> to_string |> Calendar.of_string
+  let as_of = manifest |> member "as_of" |> to_string |> Calendar.of_string in
+  let holdings =
+    Holdings.holdings_of_file (Filename.concat dir "holdings.json")
   in
-  let holdings = Holdings.holdings_of_file (Filename.concat dir "holdings.json") in
-  let bundle = Marketdata.bundle_of_file (Filename.concat dir "marketdata.json") in
+  let bundle =
+    Marketdata.bundle_of_file (Filename.concat dir "marketdata.json")
+  in
   let config = Config.of_yojson (read "config.json") in
   let instruments =
     Refdata.instruments_of_file (Filename.concat dir "instruments.json")
@@ -80,7 +80,8 @@ let mib_of_words w = float_of_int w *. 8. /. (1024. *. 1024.)
 
 let print_gc_delta label (a : gc_snap) (b : gc_snap) =
   Printf.printf
-    "  [gc] %-16s minor=%7.1fMB major=%7.1fMB live=%7.1fMB heap=%7.1fMB topheap=%7.1fMB%s\n"
+    "  [gc] %-16s minor=%7.1fMB major=%7.1fMB live=%7.1fMB heap=%7.1fMB \
+     topheap=%7.1fMB%s\n"
     label
     (mib_of_words (int_of_float (b.minor -. a.minor)))
     (mib_of_words (int_of_float (b.major -. a.major)))
@@ -103,40 +104,50 @@ let timed label f =
 
 let cmd_book rest =
   let dir = ref "" and base = ref "EUR" in
-  Arg.parse_argv (Array.of_list ("book" :: rest))
+  Arg.parse_argv
+    (Array.of_list ("book" :: rest))
     [
       ("--fixture", Arg.Set_string dir, "DIR fixture directory");
       ("--base", Arg.Set_string base, "CCY base currency (def EUR)");
     ]
-    (fun _ -> ()) "dev book --fixture DIR [--base CCY]";
-  if !dir = "" then (prerr_endline "dev book --fixture DIR [--base CCY]"; exit 2);
+    (fun _ -> ())
+    "dev book --fixture DIR [--base CCY]";
+  if !dir = "" then (
+    prerr_endline "dev book --fixture DIR [--base CCY]";
+    exit 2);
   let holdings, instruments, bundle, _config, as_of = load_fixture !dir in
   let state = Market.market_state bundle as_of in
   let book = Pricing.build_book holdings instruments state !base None in
-  let pricer = Pricing.make_pricer book state
+  let pricer =
+    Pricing.make_pricer book state
       (Market.build_factors bundle ~equity_ids:(Pricing.equity_ids book)
          ~fx_ccys:(Pricing.currencies book)
          ~curve_ccys:(Pricing.curve_currencies book)
          ~history_days:None)
   in
   let v0 = Pricing.base_values pricer in
-  Printf.printf "book as_of=%s base=%s positions=%d\n" (Calendar.to_string as_of)
-    !base (List.length book.positions);
+  Printf.printf "book as_of=%s base=%s positions=%d\n"
+    (Calendar.to_string as_of) !base
+    (List.length book.positions);
   Printf.printf "%-4s %-36s %-12s %-4s %12s %14s\n" "idx" "instrument" "type"
     "ccy" "qty" "base_value";
   List.iter
     (fun (p : Pricing.position_info) ->
       Printf.printf "%-4d %-36s %-12s %-4s %12.4f %14.2f\n" p.index
-        p.instrument_id p.inst_type p.currency p.quantity v0.(p.index))
+        p.instrument_id
+        (Risk_core.Refdata.string_of_inst_type p.inst_type)
+        p.currency p.quantity v0.(p.index))
     book.positions;
   Printf.printf "underlyings: %s\n"
     (String.concat "," (Pricing.equity_ids book));
   Printf.printf "fx: %s | curves: %s\n"
     (String.concat "," (Pricing.currencies book))
     (String.concat "," (Pricing.curve_currencies book));
-  Printf.printf "factors: %d (%s)\n" (Market.size pricer.Pricing.factors)
+  Printf.printf "factors: %d (%s)\n"
+    (Market.size pricer.Pricing.factors)
     (String.concat "," (Array.to_list pricer.Pricing.factors.names));
-  Printf.printf "nav: %.2f %s\n" (Array.fold_left ( +. ) 0. v0)
+  Printf.printf "nav: %.2f %s\n"
+    (Array.fold_left ( +. ) 0. v0)
     book.Pricing.base_currency
 
 (* --- price: one-position shock lab --- *)
@@ -151,8 +162,14 @@ let shock_for pricer underlying bump =
   sh
 
 let cmd_price rest =
-  let dir = ref "" and id = ref "" and spot = ref 0. and vol = ref 0. and h = ref 0 and base = ref "EUR" in
-  Arg.parse_argv (Array.of_list ("price" :: rest))
+  let dir = ref ""
+  and id = ref ""
+  and spot = ref 0.
+  and vol = ref 0.
+  and h = ref 0
+  and base = ref "EUR" in
+  Arg.parse_argv
+    (Array.of_list ("price" :: rest))
     [
       ("--fixture", Arg.Set_string dir, "DIR fixture directory");
       ("--base", Arg.Set_string base, "CCY base currency (def EUR)");
@@ -161,9 +178,12 @@ let cmd_price rest =
       ("--vol-bump", Arg.Set_float vol, "V absolute vol shock (def 0)");
       ("--horizon", Arg.Set_int h, "N horizon days (def 0)");
     ]
-    (fun _ -> ()) "dev price --fixture DIR --id IID [opts]";
+    (fun _ -> ())
+    "dev price --fixture DIR --id IID [opts]";
   if !dir = "" || !id = "" then (
-    prerr_endline "dev price --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N] [--base CCY]";
+    prerr_endline
+      "dev price --fixture DIR --id IID [--spot-bump F] [--vol-bump V] \
+       [--horizon N] [--base CCY]";
     exit 2);
   let holdings, instruments, bundle, _config, as_of = load_fixture !dir in
   let state = Market.market_state bundle as_of in
@@ -171,7 +191,8 @@ let cmd_price rest =
   let factors =
     Market.build_factors bundle ~equity_ids:(Pricing.equity_ids book)
       ~fx_ccys:(Pricing.currencies book)
-      ~curve_ccys:(Pricing.curve_currencies book) ~history_days:None
+      ~curve_ccys:(Pricing.curve_currencies book)
+      ~history_days:None
   in
   let pricer = Pricing.make_pricer book state factors in
   let pos =
@@ -186,7 +207,8 @@ let cmd_price rest =
     | Some p -> p.index
   in
   let opt =
-    List.find_opt (fun (o : Pricing.option_spec) -> o.Pricing.pos = pos)
+    List.find_opt
+      (fun (o : Pricing.option_spec) -> o.Pricing.pos = pos)
       book.options
   in
   let und =
@@ -233,40 +255,45 @@ let cmd_price rest =
     out.(0).(pos)
   in
   let v1 = value ~sb:!spot ~vb:!vol () in
-  Printf.printf "position %s underlying=%s base=%.4f shocked=%.4f pnl=%.4f (h=%d)\n"
-    !id und v0 v1 (v1 -. v0) !h;
+  Printf.printf
+    "position %s underlying=%s base=%.4f shocked=%.4f pnl=%.4f (h=%d)\n" !id und
+    v0 v1 (v1 -. v0) !h;
   (* bump Greeks, central differences *)
   let d_px = value ~sb:0.01 () -. value ~sb:(-0.01) () in
-  let s0 =
-    try List.assoc und state.Market.prices with Not_found -> 1.0
-  in
+  let s0 = try List.assoc und state.Market.prices with Not_found -> 1.0 in
   let dv = value ~sb:0.01 () -. (2. *. value ()) +. value ~sb:(-0.01) () in
   Printf.printf "delta=%12.4f gamma=%12.6f (per unit spot, S=%.4f)\n"
     (d_px /. 0.02 /. s0)
     (dv /. (0.01 *. s0 *. (0.01 *. s0)))
     s0;
-  (match opt with
+  match opt with
   | None -> ()
   | Some _ ->
       let vv = value ~vb:0.01 () -. value ~vb:(-0.01) () in
-      Printf.printf "vega=%12.4f (per 1.00 vol)\n" (vv /. 0.02))
+      Printf.printf "vega=%12.4f (per 1.00 vol)\n" (vv /. 0.02)
 
 (* --- bench-run: stage breakdown with Gc deltas --- *)
 
 let cmd_bench rest =
   let dir = ref "" and mc = ref 10_000 and base = ref "EUR" in
-  Arg.parse_argv (Array.of_list ("bench-run" :: rest))
+  Arg.parse_argv
+    (Array.of_list ("bench-run" :: rest))
     [
       ("--fixture", Arg.Set_string dir, "DIR fixture directory");
       ("--mc", Arg.Set_int mc, "N MC scenarios (default 10000)");
       ("--base", Arg.Set_string base, "CCY base currency (def EUR)");
     ]
-    (fun _ -> ()) "dev bench-run --fixture DIR [--mc N] [--base CCY]";
-  if !dir = "" then (prerr_endline "dev bench-run --fixture DIR [--mc N] [--base CCY]"; exit 2);
+    (fun _ -> ())
+    "dev bench-run --fixture DIR [--mc N] [--base CCY]";
+  if !dir = "" then (
+    prerr_endline "dev bench-run --fixture DIR [--mc N] [--base CCY]";
+    exit 2);
   let holdings, instruments, bundle, config, as_of =
     timed "load fixtures" (fun () -> load_fixture !dir)
   in
-  let state = timed "market_state" (fun () -> Market.market_state bundle as_of) in
+  let state =
+    timed "market_state" (fun () -> Market.market_state bundle as_of)
+  in
   let book =
     timed "build_book" (fun () ->
         Pricing.build_book holdings instruments state !base None)
@@ -291,11 +318,11 @@ let cmd_bench rest =
   in
   let n_pos = List.length book.positions in
   let res =
-    timed "run historical"
-      (fun () -> Run.run_engine inputs config ())
+    timed "run historical" (fun () -> Run.run_engine inputs config ())
   in
   Printf.printf "hist: %d scenarios x %d positions\n"
-    (Array.length factors.history) n_pos;
+    (Array.length factors.history)
+    n_pos;
   ignore res;
   let mc_config : Config.run_config =
     { config with method_ = Config.Montecarlo; n_scenarios = !mc; seed = 0 }
@@ -306,20 +333,20 @@ let cmd_bench rest =
   let dt = Unix.gettimeofday () -. t0 in
   let g1 = gc_snapshot () in
   let evals = !mc * n_pos in
-  Printf.printf "%-28s %8.3f s  (%d evals, %.2f us/eval)\n%!" "run MC"
-    dt evals
+  Printf.printf "%-28s %8.3f s  (%d evals, %.2f us/eval)\n%!" "run MC" dt evals
     (dt *. 1e6 /. float_of_int evals);
   print_gc_delta "run MC" g0 g1;
   ignore mc_res;
-  (match peak_rss_kb () with
+  match peak_rss_kb () with
   | None -> Printf.printf "peak_rss: n/a (non-Linux?)\n"
-  | Some kb -> Printf.printf "peak_rss: %d MB\n" (kb / 1024))
+  | Some kb -> Printf.printf "peak_rss: %d MB\n" (kb / 1024)
 
 let usage =
   "dev: engine playground (non-production diagnostics)\n\
    usage: dev (book|price|bench-run) [opts]\n\
   \  book --fixture DIR [--base CCY]\n\
-  \  price --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N] [--base CCY]\n\
+  \  price --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N] \
+   [--base CCY]\n\
   \  bench-run --fixture DIR [--mc N] [--base CCY]"
 
 let () =

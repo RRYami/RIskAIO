@@ -15,3 +15,8 @@
 (executable
  (name dev)
  (libraries risk_core risk_engine yojson unix))
+
+(executable
+ (name api)
+ (public_name risk-ai-api)
+ (libraries risk_api lwt lwt.unix cohttp-lwt-unix))

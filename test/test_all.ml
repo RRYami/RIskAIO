@@ -52,6 +52,42 @@ let test_money_exact () =
   Alcotest.check Alcotest.string "exact-value" "1/40"
     (Q.to_string (Money.exact_of (Money.decimal_of_string "0.025")))
 
+(* --- taxonomy (P7b) --- *)
+
+let test_taxonomy_roundtrip () =
+  List.iter
+    (fun s ->
+      Alcotest.check Alcotest.string ("roundtrip:" ^ s) s
+        (Refdata.string_of_inst_type (Refdata.inst_type_of_string s)))
+    [
+      "EQUITY";
+      "ETF";
+      "FUND";
+      "FUTURE";
+      "LISTED_OPTION";
+      "GOV_BOND";
+      "CORP_BOND";
+      "CASH";
+      "FX_FORWARD";
+    ]
+
+let test_taxonomy_rejects () =
+  (match
+     try Some (Refdata.inst_type_of_string "SWAP")
+     with Invalid_argument _ -> None
+   with
+  | None -> ()
+  | Some _ -> Alcotest.fail "accepted unknown instrument type");
+  match
+    try
+      Some
+        (Refdata.validate_terms Refdata.Listed_option
+           [ ("strike", `Float 100.) ])
+    with Invalid_argument _ -> None
+  with
+  | None -> ()
+  | Some _ -> Alcotest.fail "accepted option terms without expiry"
+
 (* --- calendar --- *)
 
 let d = Calendar.of_string
@@ -263,36 +299,35 @@ let test_config_vol_compat () =
   let minimal =
     Config.of_yojson
       (`Assoc
-        [
-          ("method", `String "historical");
-          ("confidences", `List [ `Float 0.99 ]);
-          ("horizons", `List [ `Int 1 ]);
-          ("history_days", `Int 500);
-          ("weighting", `String "equal");
-          ("brw_lambda", `Float 0.99);
-          ("covariance", `String "ewma");
-          ("ewma_lambda", `Float 0.97);
-          ("curve_pcs", `Int 3);
-          ("distribution", `String "gaussian");
-          ("nu", `Float 5.0);
-          ("n_scenarios", `Int 10000);
-          ("seed", `Int 0);
-          ("component_confidence", `Float 0.99);
-          ("ucits_limit", `Float 0.2);
-          ("stress", `List []);
-          ("historical_windows", `List []);
-          ("worst_window_days", `Int 20);
-          ("chunk_size", `Int 2000);
-          ("backtest", `Null);
-          ("vol_model", `Null);
-          ("vol_pcs", `Null);
-          ("vol_universe", `Null);
-        ])
+         [
+           ("method", `String "historical");
+           ("confidences", `List [ `Float 0.99 ]);
+           ("horizons", `List [ `Int 1 ]);
+           ("history_days", `Int 500);
+           ("weighting", `String "equal");
+           ("brw_lambda", `Float 0.99);
+           ("covariance", `String "ewma");
+           ("ewma_lambda", `Float 0.97);
+           ("curve_pcs", `Int 3);
+           ("distribution", `String "gaussian");
+           ("nu", `Float 5.0);
+           ("n_scenarios", `Int 10000);
+           ("seed", `Int 0);
+           ("component_confidence", `Float 0.99);
+           ("ucits_limit", `Float 0.2);
+           ("stress", `List []);
+           ("historical_windows", `List []);
+           ("worst_window_days", `Int 20);
+           ("chunk_size", `Int 2000);
+           ("backtest", `Null);
+           ("vol_model", `Null);
+           ("vol_pcs", `Null);
+           ("vol_universe", `Null);
+         ])
   in
   Alcotest.check Alcotest.bool "frozen-default" true
     (minimal.vol_model = Config.Frozen
-    && minimal.vol_pcs = 0
-    && minimal.vol_universe = []);
+    && minimal.vol_pcs = 0 && minimal.vol_universe = []);
   Config.validate minimal;
   (match
      try Some (Config.validate { minimal with vol_model = Config.Bootstrap })
@@ -300,19 +335,19 @@ let test_config_vol_compat () =
    with
   | None -> ()
   | Some _ -> Alcotest.fail "bootstrap without universe accepted");
-  (match
-     try
-       Some
-         (Config.validate
-            {
-              minimal with
-              vol_model = Config.Gaussian;
-              vol_universe = [ "EQ1" ];
-            })
-     with Invalid_argument _ -> None
-   with
+  match
+    try
+      Some
+        (Config.validate
+           {
+             minimal with
+             vol_model = Config.Gaussian;
+             vol_universe = [ "EQ1" ];
+           })
+    with Invalid_argument _ -> None
+  with
   | None -> ()
-  | Some _ -> Alcotest.fail "gaussian without montecarlo accepted")
+  | Some _ -> Alcotest.fail "gaussian without montecarlo accepted"
 
 (* --- fixtures (gated on RISK_AI_FIXTURES) --- *)
 
@@ -372,8 +407,16 @@ let db_test_bundle () =
       ]
     ~fx:
       [
-        { Risk_db.Db.date = "2024-08-21"; currency = "USD"; rate_to_eur = "0.9" };
-        { Risk_db.Db.date = "2024-08-22"; currency = "USD"; rate_to_eur = "0.9" };
+        {
+          Risk_db.Db.date = "2024-08-21";
+          currency = "USD";
+          rate_to_eur = "0.9";
+        };
+        {
+          Risk_db.Db.date = "2024-08-22";
+          currency = "USD";
+          rate_to_eur = "0.9";
+        };
       ]
     ~curves:(db_curve_tuples ())
     ~vols:[ { Risk_db.Db.instrument_id = "EQ1"; atm_vol_30d = 0.2 } ]
@@ -406,6 +449,201 @@ let test_db_contract_grid_reject () =
   with
   | None -> ()
   | Some _ -> Alcotest.fail "accepted gappy curve grid"
+
+(* --- pricing scratch reuse (P7d regression) --- *)
+
+(** Minimal pricer with [npos] positions (cash only; never priced). *)
+let ws_test_pricer npos =
+  let date = Calendar.of_string "2024-08-21" in
+  let positions =
+    List.init npos (fun i ->
+        {
+          Pricing.index = i;
+          instrument_id = Printf.sprintf "P%d" i;
+          inst_type = Refdata.Cash;
+          currency = "EUR";
+          quantity = 1.;
+          issuer = "";
+          sector = "";
+          country = "";
+          portfolio = "";
+        })
+  in
+  let book : Pricing.book =
+    {
+      Pricing.positions;
+      base_currency = "EUR";
+      linear = [];
+      futures = [];
+      options = [];
+      bonds = [];
+      cash = List.init npos Fun.id;
+      fx_forwards = [];
+    }
+  in
+  let state : Market.market_state =
+    {
+      Market.as_of = date;
+      prices = [];
+      fx = [];
+      curves = [];
+      vols = [];
+      spreads = [];
+      dividends = [];
+    }
+  in
+  let factors : Market.factor_set =
+    { Market.names = [||]; index = []; history = [||]; return_dates = [||] }
+  in
+  {
+    Pricing.book;
+    state;
+    factors;
+    n_pos = npos;
+    lin_pos = [||];
+    lin_f = [||];
+    lin_v0 = [||];
+    pos_ccy = Array.make npos "EUR";
+    fut_f0 = [||];
+    fx_ccys = [];
+    rolled = Hashtbl.create 0;
+  }
+
+let test_ws_reuse () =
+  (* Buffers must be exact-sized: a wider leftover from another book used to
+     be reused, corrupting folds over physical rows (found via the API
+     roundtrip + vol-e2e suite order). *)
+  let a = Pricing.ws_out (ws_test_pricer 16) 10 in
+  Alcotest.check Alcotest.int "rows" 10 (Array.length a);
+  Alcotest.check Alcotest.int "cols" 16 (Array.length a.(0));
+  a.(0).(0) <- 7.;
+  let b = Pricing.ws_out (ws_test_pricer 2) 10 in
+  Alcotest.check Alcotest.int "narrow-cols" 2 (Array.length b.(0));
+  Alcotest.check (Alcotest.float 0.) "zeroed" 0. b.(0).(0);
+  let c = Pricing.ws_out (ws_test_pricer 2) 5 in
+  Alcotest.check Alcotest.int "short-rows" 5 (Array.length c)
+
+(* --- api (P7d) --- *)
+
+let api_svc () =
+  Risk_api.Service.make (Risk_api.Service.of_mem (Risk_api.Store.Mem.make ()))
+
+let test_api_roundtrip () =
+  match Sys.getenv_opt "RISK_AI_FIXTURES" with
+  | None -> Alcotest.skip ()
+  | Some dir ->
+      let instruments =
+        Refdata.instruments_of_file (Filename.concat dir "instruments.json")
+      in
+      let holdings =
+        Holdings.holdings_of_file (Filename.concat dir "holdings.json")
+      in
+      let bundle =
+        Marketdata.bundle_of_file (Filename.concat dir "marketdata.json")
+      in
+      let config =
+        Config.of_yojson
+          (Yojson.Basic.from_file (Filename.concat dir "config.json"))
+      in
+      let manifest =
+        Yojson.Basic.from_file (Filename.concat dir "manifest.json")
+      in
+      let open Yojson.Basic.Util in
+      let as_of =
+        manifest |> member "as_of" |> to_string |> Calendar.of_string
+      in
+      let inputs : Run.engine_inputs =
+        {
+          holdings;
+          instruments;
+          bundle;
+          as_of;
+          base_currency = "EUR";
+          row_portfolios = None;
+          surf_fits = [];
+        }
+      in
+      let svc = api_svc () in
+      let job =
+        Lwt_main.run
+          (let open Lwt.Infix in
+           Risk_api.Service.submit svc ~inputs ~config >>= fun j ->
+           Risk_api.Service.await svc j.Risk_api.Job.id)
+      in
+      Alcotest.check Alcotest.string "status" "done"
+        (Risk_api.Job.string_of_status job.Risk_api.Job.status);
+      Alcotest.check Alcotest.bool "rows" true (job.Risk_api.Job.rows <> []);
+      Alcotest.check Alcotest.bool "diag" true
+        (List.mem_assoc "method" job.Risk_api.Job.diagnostics)
+
+let test_api_cancel () =
+  let entered = Atomic.make false and release = Atomic.make false in
+  let runner _ _ ~should_cancel =
+    Atomic.set entered true;
+    let n = ref 0 in
+    while (not (Atomic.get release)) && !n < 2000 do
+      Thread.delay 0.005;
+      incr n
+    done;
+    match should_cancel with
+    | Some f when f () -> raise (Run.Engine_cancelled "test-cancel")
+    | _ -> failwith "cancel flag was not observed"
+  in
+  let as_of = Calendar.of_string "2024-08-22" in
+  let inputs : Run.engine_inputs =
+    {
+      holdings = [];
+      instruments = [];
+      bundle = Risk_api.Job.(placeholder_inputs as_of "EUR").bundle;
+      as_of;
+      base_currency = "EUR";
+      row_portfolios = None;
+      surf_fits = [];
+    }
+  in
+  let svc = api_svc () in
+  let job =
+    Lwt_main.run
+      (Risk_api.Service.submit ~runner svc ~inputs ~config:Config.default)
+  in
+  let n = ref 0 in
+  while (not (Atomic.get entered)) && !n < 2000 do
+    Thread.delay 0.005;
+    incr n
+  done;
+  Alcotest.check Alcotest.bool "runner-started" true (Atomic.get entered);
+  Lwt_main.run (Risk_api.Service.cancel svc job.Risk_api.Job.id) |> ignore;
+  Atomic.set release true;
+  let done_ =
+    Lwt_main.run (Risk_api.Service.await ~timeout_s:30. svc job.Risk_api.Job.id)
+  in
+  Alcotest.check Alcotest.string "cancelled" "cancelled"
+    (Risk_api.Job.string_of_status done_.Risk_api.Job.status)
+
+let test_api_routes () =
+  let svc = api_svc () in
+  let call meth path =
+    let req = Cohttp.Request.make ~meth (Uri.of_string ("http://x" ^ path)) in
+    Lwt_main.run (Risk_api.Server.callback svc () req Cohttp_lwt.Body.empty)
+  in
+  let code_of (resp, _) =
+    Cohttp.Code.code_of_status (Cohttp.Response.status resp)
+  in
+  Alcotest.check Alcotest.int "health" 200 (code_of (call `GET "/health"));
+  Alcotest.check Alcotest.int "unknown" 404 (code_of (call `GET "/nope"));
+  Alcotest.check Alcotest.int "missing-run" 404
+    (code_of (call `GET "/api/runs/nope"));
+  (match Lwt_main.run (Risk_api.Service.get svc "nope") with
+  | None -> ()
+  | Some _ -> Alcotest.fail "found nonexistent run");
+  match
+    try
+      ignore (Lwt_main.run (Risk_api.Service.cancel svc "nope"));
+      None
+    with Not_found -> Some ()
+  with
+  | Some () -> ()
+  | None -> Alcotest.fail "cancel of nonexistent run did not raise"
 
 (* --- csv --- *)
 
@@ -451,17 +689,17 @@ let test_csv_rejects () =
    with
   | None -> ()
   | Some _ -> Alcotest.fail "accepted ragged row");
-  (match
-     try Some (Csv.header_index [ [ "a"; "a" ] ])
-     with Csv.Csv_error _ -> None
-   with
+  match
+    try Some (Csv.header_index [ [ "a"; "a" ] ]) with Csv.Csv_error _ -> None
+  with
   | None -> ()
-  | Some _ -> Alcotest.fail "accepted duplicate column")
+  | Some _ -> Alcotest.fail "accepted duplicate column"
 
 let test_csv_col () =
   let rows = Csv.check_width (Csv.parse_string "a,b\n1, 2 \n") in
   let idx = Csv.header_index rows in
-  Alcotest.check Alcotest.string "trimmed" "2" (Csv.col idx "b" (List.nth rows 1))
+  Alcotest.check Alcotest.string "trimmed" "2"
+    (Csv.col idx "b" (List.nth rows 1))
 
 (* --- quotes --- *)
 
@@ -470,13 +708,22 @@ let test_quotes_roundtrip () =
   let tq = Risk_engine.Quotes.t_years ~date:"2024-08-21" ~expiry:"2025-02-20" in
   let px =
     (Risk_engine.Options.black_scholes ~s:[| s |] ~k ~t:tq ~r:[| r |]
-       ~b:[| r -. q |] ~sigma:sg ~call:true).(0)
+       ~b:[| r -. q |]
+       ~sigma:sg ~call:true).(0)
   in
   let qot : Risk_engine.Quotes.quote =
     {
-      date = "2024-08-21"; underlying = "SOXX"; expiry = "2025-02-20";
-      right = Risk_engine.Quotes.Call; strike = k; bid = px -. 0.05;
-      ask = px +. 0.05; mid = px; spot = s; rate = r; div = q;
+      date = "2024-08-21";
+      underlying = "SOXX";
+      expiry = "2025-02-20";
+      right = Risk_engine.Quotes.Call;
+      strike = k;
+      bid = px -. 0.05;
+      ask = px +. 0.05;
+      mid = px;
+      spot = s;
+      rate = r;
+      div = q;
     }
   in
   Alcotest.check Alcotest.bool "otm" true (Risk_engine.Quotes.is_otm qot ~t:tq);
@@ -488,12 +735,12 @@ let test_quotes_roundtrip () =
     (Risk_engine.Quotes.is_otm itm ~t:tq);
   (* crossed market raises *)
   let crossed = { qot with bid = px +. 1.; ask = px -. 1. } in
-  (match
-     try Some (Risk_engine.Quotes.iv_of_quote crossed ~t:tq)
-     with Risk_engine.Quotes.Quotes_error _ -> None
-   with
+  match
+    try Some (Risk_engine.Quotes.iv_of_quote crossed ~t:tq)
+    with Risk_engine.Quotes.Quotes_error _ -> None
+  with
   | None -> ()
-  | Some _ -> Alcotest.fail "accepted crossed market")
+  | Some _ -> Alcotest.fail "accepted crossed market"
 
 let test_quotes_amer () =
   (* BS-2002 roundtrip: price American at known sigma, invert, recover.
@@ -518,12 +765,22 @@ let test_quotes_amer () =
       let px =
         Risk_engine.Options.bs2002_1 ~s ~k ~t ~r ~b:(r -. q) ~sigma:sg ~call
       in
-      let right = if call then Risk_engine.Quotes.Call else Risk_engine.Quotes.Put in
+      let right =
+        if call then Risk_engine.Quotes.Call else Risk_engine.Quotes.Put
+      in
       let qot : Risk_engine.Quotes.quote =
         {
-          date = "2024-08-21"; underlying = "SOXX"; expiry = "2025-02-20";
-          right; strike = k; bid = px -. 0.02; ask = px +. 0.02; mid = px;
-          spot = s; rate = r; div = q;
+          date = "2024-08-21";
+          underlying = "SOXX";
+          expiry = "2025-02-20";
+          right;
+          strike = k;
+          bid = px -. 0.02;
+          ask = px +. 0.02;
+          mid = px;
+          spot = s;
+          rate = r;
+          div = q;
         }
       in
       let got = Risk_engine.Quotes.iv_of_quote_amer qot ~t in
@@ -535,19 +792,29 @@ let test_quotes_amer () =
   let tq = Risk_engine.Quotes.t_years ~date:"2024-08-21" ~expiry:"2024-11-20" in
   let k, sg = (110.0, 0.40) in
   let px =
-    (Risk_engine.Options.baw ~s:[| s |] ~k ~t:tq ~r:[| r |] ~b:[| r -. q |]
+    (Risk_engine.Options.baw ~s:[| s |] ~k ~t:tq ~r:[| r |]
+       ~b:[| r -. q |]
        ~sigma:sg ~call:false).(0)
   in
   let euro =
     (Risk_engine.Options.black_scholes ~s:[| s |] ~k ~t:tq ~r:[| r |]
-       ~b:[| r -. q |] ~sigma:sg ~call:false).(0)
+       ~b:[| r -. q |]
+       ~sigma:sg ~call:false).(0)
   in
   Alcotest.check Alcotest.bool "amer-premium-positive" true (px > euro +. 0.01);
   let qot : Risk_engine.Quotes.quote =
     {
-      date = "2024-08-21"; underlying = "SOXX"; expiry = "2024-11-20";
-      right = Risk_engine.Quotes.Put; strike = k; bid = px -. 0.02;
-      ask = px +. 0.02; mid = px; spot = s; rate = r; div = q;
+      date = "2024-08-21";
+      underlying = "SOXX";
+      expiry = "2024-11-20";
+      right = Risk_engine.Quotes.Put;
+      strike = k;
+      bid = px -. 0.02;
+      ask = px +. 0.02;
+      mid = px;
+      spot = s;
+      rate = r;
+      div = q;
     }
   in
   let amer = Risk_engine.Quotes.iv_of_quote_amer qot ~t:tq in
@@ -566,39 +833,53 @@ let test_quotes_grid_itm () =
     in
     {
       Risk_engine.Quotes.date = "2024-08-21";
-      underlying = "SOXX"; expiry = "2025-02-20";
-      right; strike; bid = px -. 0.02; ask = px +. 0.02; mid = px;
-      spot = s; rate = r; div = q;
+      underlying = "SOXX";
+      expiry = "2025-02-20";
+      right;
+      strike;
+      bid = px -. 0.02;
+      ask = px +. 0.02;
+      mid = px;
+      spot = s;
+      rate = r;
+      div = q;
     }
   in
   let gs =
-    Risk_engine.Quotes.to_grids [ mk Risk_engine.Quotes.Put 110.; mk Risk_engine.Quotes.Call 110. ]
+    Risk_engine.Quotes.to_grids
+      [ mk Risk_engine.Quotes.Put 110.; mk Risk_engine.Quotes.Call 110. ]
   in
   Alcotest.check Alcotest.int "one-expiry" 1 (List.length gs);
   let g = List.hd gs in
-  Alcotest.check Alcotest.int "two-strikes" 2 (Array.length g.Risk_engine.Quotes.k);
+  Alcotest.check Alcotest.int "two-strikes" 2
+    (Array.length g.Risk_engine.Quotes.k);
   Array.iter
     (fun v -> Alcotest.check (Alcotest.float 1e-6) "iv" sg v)
     g.Risk_engine.Quotes.iv;
   (* stale mid below intrinsic is rejected, not fitted *)
-  let bad =
-    mk Risk_engine.Quotes.Put 110.
-  in
+  let bad = mk Risk_engine.Quotes.Put 110. in
   let bad = { bad with Risk_engine.Quotes.mid = 0.5 } in
-  (match
-     try Some (Risk_engine.Quotes.to_grids [ bad ])
-     with Risk_engine.Quotes.Quotes_error _ -> None
-   with
+  match
+    try Some (Risk_engine.Quotes.to_grids [ bad ])
+    with Risk_engine.Quotes.Quotes_error _ -> None
+  with
   | None -> ()
-  | Some _ -> Alcotest.fail "accepted stale mid")
+  | Some _ -> Alcotest.fail "accepted stale mid"
 
 let test_quotes_grid () =
   let mk k mid =
     {
       Risk_engine.Quotes.date = "2024-08-21";
-      underlying = "SOXX"; expiry = "2025-02-20";
-      right = Risk_engine.Quotes.Call; strike = k; bid = mid -. 0.02;
-      ask = mid +. 0.02; mid; spot = 100.; rate = 0.02; div = 0.01;
+      underlying = "SOXX";
+      expiry = "2025-02-20";
+      right = Risk_engine.Quotes.Call;
+      strike = k;
+      bid = mid -. 0.02;
+      ask = mid +. 0.02;
+      mid;
+      spot = 100.;
+      rate = 0.02;
+      div = 0.01;
     }
   in
   (* OTM call mids from Black at two vols; insert out of order.
@@ -608,7 +889,10 @@ let test_quotes_grid () =
     (Risk_engine.Options.black_scholes ~s:[| 100. |] ~k ~t ~r:[| 0.02 |]
        ~b:[| 0.01 |] ~sigma:sg ~call:true).(0)
   in
-  let gs = Risk_engine.Quotes.to_grids [ mk 120. (px 0.3 120.); mk 105. (px 0.25 105.) ] in
+  let gs =
+    Risk_engine.Quotes.to_grids
+      [ mk 120. (px 0.3 120.); mk 105. (px 0.25 105.) ]
+  in
   Alcotest.check Alcotest.int "one-expiry" 1 (List.length gs);
   let g = List.hd gs in
   Alcotest.check (Alcotest.float 1e-9) "t" t g.Risk_engine.Quotes.t;
@@ -655,7 +939,8 @@ let test_sc_valid () =
   Alcotest.check Alcotest.string "gj" "gj-sufficient"
     gj.Risk_engine.Surface_constraints.name;
   Alcotest.check Alcotest.bool "gj-pass" true
-    (gj.Risk_engine.Surface_constraints.status = Risk_engine.Surface_constraints.Pass)
+    (gj.Risk_engine.Surface_constraints.status
+   = Risk_engine.Surface_constraints.Pass)
 
 let test_sc_structural () =
   let iv = sc_grid sc_u in
@@ -666,12 +951,10 @@ let test_sc_structural () =
   in
   Alcotest.check Alcotest.bool "invalid" false
     rep.Risk_engine.Surface_constraints.valid;
-  Alcotest.check st_check "structural-fail"
-    Risk_engine.Surface_constraints.Fail
+  Alcotest.check st_check "structural-fail" Risk_engine.Surface_constraints.Fail
     (sc_status rep "structural");
   Alcotest.check st_check "calendar-indet"
-    Risk_engine.Surface_constraints.Indeterminate
-    (sc_status rep "calendar")
+    Risk_engine.Surface_constraints.Indeterminate (sc_status rep "calendar")
 
 let test_sc_calendar () =
   let iv = sc_grid sc_u in
@@ -742,23 +1025,25 @@ let synth_grids ~seed u noise =
 
 let test_cal_recovery () =
   let grids = synth_grids ~seed:42 cal_true_u 0.002 in
-  (match Risk_engine.Ssvi_calibration.fit_day grids ~date:"2024-08-21" with
+  match Risk_engine.Ssvi_calibration.fit_day grids ~date:"2024-08-21" with
   | Risk_engine.Ssvi_calibration.Failed f ->
       Alcotest.fail ("fit failed: " ^ f.reason)
   | Risk_engine.Ssvi_calibration.Ok f ->
       Alcotest.check Alcotest.bool "converged" true f.converged;
       Alcotest.check Alcotest.bool "noise-level" true (f.fun_ < 1e-5);
       Alcotest.check Alcotest.bool "rmse" true (f.rmse_iv < 0.004);
-      Alcotest.check Alcotest.bool "cold-start" false f.warm)
+      Alcotest.check Alcotest.bool "cold-start" false f.warm
 
 let test_cal_history () =
   let drift i =
-    Array.mapi (fun j x -> if j = 4 then x +. (0.02 *. float_of_int i) else x)
+    Array.mapi
+      (fun j x -> if j = 4 then x +. (0.02 *. float_of_int i) else x)
       cal_true_u
   in
   let days =
     List.init 3 (fun i ->
-        ("2024-08-2" ^ string_of_int (i + 1), synth_grids ~seed:(100 + i) (drift i) 0.001))
+        ( "2024-08-2" ^ string_of_int (i + 1),
+          synth_grids ~seed:(100 + i) (drift i) 0.001 ))
   in
   let outs = Risk_engine.Ssvi_calibration.fit_history days in
   Alcotest.check Alcotest.int "three-days" 3 (List.length outs);
@@ -789,7 +1074,8 @@ let test_cal_json () =
   Alcotest.check (Alcotest.float 1e-15) "fun" f.fun_ f2.fun_;
   Array.iteri
     (fun i x ->
-      Alcotest.check (Alcotest.float 1e-15) "u" x f2.Risk_engine.Ssvi_calibration.u.(i))
+      Alcotest.check (Alcotest.float 1e-15) "u" x
+        f2.Risk_engine.Ssvi_calibration.u.(i))
     f.Risk_engine.Ssvi_calibration.u
 
 let test_cal_recanon () =
@@ -828,13 +1114,13 @@ let test_cal_failure () =
   (match Risk_engine.Ssvi_calibration.fit_day [] ~date:"2024-08-21" with
   | Risk_engine.Ssvi_calibration.Failed _ -> ()
   | Risk_engine.Ssvi_calibration.Ok _ -> Alcotest.fail "empty fit accepted");
-  (match
-     Risk_engine.Ssvi_calibration.fit_day
-       [ { Risk_engine.Quotes.t = 0.5; k = [||]; iv = [||]; w = [||] } ]
-       ~date:"2024-08-21"
-   with
+  match
+    Risk_engine.Ssvi_calibration.fit_day
+      [ { Risk_engine.Quotes.t = 0.5; k = [||]; iv = [||]; w = [||] } ]
+      ~date:"2024-08-21"
+  with
   | Risk_engine.Ssvi_calibration.Failed _ -> ()
-  | Risk_engine.Ssvi_calibration.Ok _ -> Alcotest.fail "empty expiry accepted")
+  | Risk_engine.Ssvi_calibration.Ok _ -> Alcotest.fail "empty expiry accepted"
 
 (* --- pca latent --- *)
 
@@ -855,15 +1141,20 @@ let plat_fits () =
 let test_plat_gaps () =
   let lat = Risk_engine.Pca_latent.of_fits (plat_fits ()) in
   (* 4 adjacent pairs, minus the 8-26->8-28 two-day gap *)
-  Alcotest.check Alcotest.int "diffs" 3 (Array.length lat.Risk_engine.Pca_latent.d_hist);
-  Alcotest.check Alcotest.int "dropped" 1 lat.Risk_engine.Pca_latent.n_gap_dropped;
+  Alcotest.check Alcotest.int "diffs" 3
+    (Array.length lat.Risk_engine.Pca_latent.d_hist);
+  Alcotest.check Alcotest.int "dropped" 1
+    lat.Risk_engine.Pca_latent.n_gap_dropped;
   Alcotest.check Alcotest.string "last" "2024-08-26"
     lat.Risk_engine.Pca_latent.d_dates.(2)
 
 let test_plat_pca () =
   let lat = Risk_engine.Pca_latent.of_fits (plat_fits ()) in
-  let full = Risk_engine.Pca_latent.pca_fit lat.Risk_engine.Pca_latent.d_hist 0 in
-  Alcotest.check Alcotest.bool "explained" true (full.Risk_engine.Pca_latent.explained > 0.999);
+  let full =
+    Risk_engine.Pca_latent.pca_fit lat.Risk_engine.Pca_latent.d_hist 0
+  in
+  Alcotest.check Alcotest.bool "explained" true
+    (full.Risk_engine.Pca_latent.explained > 0.999);
   (* full-rank projection reconstructs *)
   let d = lat.Risk_engine.Pca_latent.d_hist.(0) in
   let r = Risk_engine.Pca_latent.project full d in
@@ -873,7 +1164,8 @@ let test_plat_pca () =
   (* truncation drops variance *)
   let k1 = Risk_engine.Pca_latent.pca_fit lat.Risk_engine.Pca_latent.d_hist 1 in
   Alcotest.check Alcotest.bool "residual" true
-    (k1.Risk_engine.Pca_latent.residual_share >= full.Risk_engine.Pca_latent.residual_share);
+    (k1.Risk_engine.Pca_latent.residual_share
+   >= full.Risk_engine.Pca_latent.residual_share);
   (* scores round-trip through loadings *)
   let sc = Risk_engine.Pca_latent.scores k1 d in
   Alcotest.check Alcotest.int "k" 1 (Array.length sc)
@@ -882,29 +1174,30 @@ let test_plat_base () =
   let lat = Risk_engine.Pca_latent.of_fits (plat_fits ()) in
   let b = Risk_engine.Pca_latent.base_state lat ~as_of:"2024-08-26" in
   let u26 = lat.Risk_engine.Pca_latent.u_hist.(3) in
-  Array.iteri (fun i x -> Alcotest.check (Alcotest.float 1e-15) "base" x b.(i)) u26;
+  Array.iteri
+    (fun i x -> Alcotest.check (Alcotest.float 1e-15) "base" x b.(i))
+    u26;
   Alcotest.check Alcotest.bool "diff-found" true
     (Risk_engine.Pca_latent.diff_of_date lat "2024-08-26" <> None);
   Alcotest.check Alcotest.bool "diff-missing" true
     (Risk_engine.Pca_latent.diff_of_date lat "2024-08-28" = None);
-  (match
-     try Some (Risk_engine.Pca_latent.base_state lat ~as_of:"2024-08-01")
-     with Invalid_argument _ -> None
-   with
+  match
+    try Some (Risk_engine.Pca_latent.base_state lat ~as_of:"2024-08-01")
+    with Invalid_argument _ -> None
+  with
   | None -> ()
-  | Some _ -> Alcotest.fail "base before first fit accepted")
+  | Some _ -> Alcotest.fail "base before first fit accepted"
 
 (* --- vol engine end-to-end (synthetic book + Bootstrap) --- *)
 
-(** Tiny EUR book: 100 shares + short 10 European calls. 41 daily closes
-    (seeded walk), quotes fitted per day, Bootstrap vs Frozen comparison. *)
+(** Tiny EUR book: 100 shares + short 10 European calls. 41 daily closes (seeded
+    walk), quotes fitted per day, Bootstrap vs Frozen comparison. *)
 let e2e_bundle ~n_days ~seed =
   let st = Random.State.make [| seed |] in
   let t0 = Risk_core.Calendar.of_string "2024-08-21" in
   let dates =
     Array.init n_days (fun i ->
-        Risk_core.Calendar.to_string
-          (Risk_core.Calendar.add_business_days t0 i))
+        Risk_core.Calendar.to_string (Risk_core.Calendar.add_business_days t0 i))
   in
   let rets = Array.init n_days (fun _ -> gauss st *. 0.01) in
   let s = ref 100. in
@@ -968,7 +1261,7 @@ let e2e_inputs (bundle : Risk_core.Marketdata.bundle) fits =
   let und : Refdata.instrument_record =
     {
       instrument_id = "EQ1";
-      inst_type = "EQUITY";
+      inst_type = Refdata.Equity;
       currency = "EUR";
       terms =
         [
@@ -982,7 +1275,7 @@ let e2e_inputs (bundle : Risk_core.Marketdata.bundle) fits =
   and opt : Refdata.instrument_record =
     {
       instrument_id = "OPT1";
-      inst_type = "LISTED_OPTION";
+      inst_type = Refdata.Listed_option;
       currency = "EUR";
       terms =
         [
@@ -1019,9 +1312,13 @@ let e2e_inputs (bundle : Risk_core.Marketdata.bundle) fits =
       };
     ]
   in
-  let as_of = Risk_core.Calendar.add_business_days (Risk_core.Calendar.of_string "2024-08-21") (n_days - 1) in
+  let as_of =
+    Risk_core.Calendar.add_business_days
+      (Risk_core.Calendar.of_string "2024-08-21")
+      (n_days - 1)
+  in
   ( {
-      Risk_engine.Run.holdings = holdings;
+      Risk_engine.Run.holdings;
       instruments = [ ("EQ1", und); ("OPT1", opt) ];
       bundle;
       as_of;
@@ -1053,9 +1350,7 @@ let e2e_config vol =
     vol_model = vol;
     vol_pcs = 0;
     vol_universe =
-      (match vol with
-      | Risk_engine.Config.Frozen -> []
-      | _ -> [ "EQ1" ]);
+      (match vol with Risk_engine.Config.Frozen -> [] | _ -> [ "EQ1" ]);
   }
 
 let e2e_var res =
@@ -1085,12 +1380,15 @@ let test_e2e_bootstrap () =
     Risk_engine.Run.run_engine inputs (e2e_config Risk_engine.Config.Frozen) ()
   in
   let boot =
-    Risk_engine.Run.run_engine inputs (e2e_config Risk_engine.Config.Bootstrap) ()
+    Risk_engine.Run.run_engine inputs
+      (e2e_config Risk_engine.Config.Bootstrap)
+      ()
   in
   let vf = e2e_var frozen and vb = e2e_var boot in
   Alcotest.check Alcotest.bool "var-positive" true (vf > 0. && vb > 0.);
   (* vol shocks move the short-call book *)
-  Alcotest.check Alcotest.bool "vol-matters" true (abs_float (vb -. vf) > 1e-6 *. vf);
+  Alcotest.check Alcotest.bool "vol-matters" true
+    (abs_float (vb -. vf) > 1e-6 *. vf);
   let diag = boot.Risk_engine.Run.diagnostics in
   Alcotest.check Alcotest.bool "vol-diag" true
     (List.assoc_opt "vol_model" diag = Some (`String "bootstrap"));
@@ -1101,8 +1399,8 @@ let test_e2e_bootstrap () =
 
 (* --- american accuracy: BAW vs CRR binomial reference --- *)
 
-(** Cox-Ross-Rubinstein American pricer (reference only: O(n^2), too slow
-    for scenarios). Continuous yield, n steps. *)
+(** Cox-Ross-Rubinstein American pricer (reference only: O(n^2), too slow for
+    scenarios). Continuous yield, n steps. *)
 let crr_amer ~s ~k ~t ~r ~q ~sigma ~call ~n =
   let dt = t /. float_of_int n in
   let up = exp (sigma *. sqrt dt) in
@@ -1128,7 +1426,6 @@ let crr_amer ~s ~k ~t ~r ~q ~sigma ~call ~n =
 
 (* --- american shootout: BAW vs Bjerksund-Stensland 2002 vs CRR --- *)
 
-
 let test_amer_accuracy () =
   (* Phi2 quadrature goldens (exact values) *)
   Alcotest.check (Alcotest.float 1e-9) "phi2-000" 0.25
@@ -1141,11 +1438,11 @@ let test_amer_accuracy () =
   List.iter
     (fun call ->
       let v1 =
-        Risk_engine.Options.bs2002 ~s:ss ~k:500. ~t:0.5 ~r:rr ~b:bb
-          ~sigma:0.4 ~call
+        Risk_engine.Options.bs2002 ~s:ss ~k:500. ~t:0.5 ~r:rr ~b:bb ~sigma:0.4
+          ~call
       and vv =
-        Risk_engine.Options.bs2002_v ~s:ss ~k:500. ~t:0.5 ~r:rr ~b:bb
-          ~sigma:sg ~call
+        Risk_engine.Options.bs2002_v ~s:ss ~k:500. ~t:0.5 ~r:rr ~b:bb ~sigma:sg
+          ~call
       in
       Array.iteri
         (fun i x ->
@@ -1169,7 +1466,7 @@ let test_amer_accuracy () =
     (Risk_engine.Options.phi2 (-0.4) 0.7 0.3);
   (* quadrature path (|rho| >= 0.925): Phi2(0,0,rho) = 1/4 + asin(rho)/2pi *)
   Alcotest.check (Alcotest.float 1e-9) "phi2-quad"
-    (0.25 +. asin 0.99 /. (2. *. Float.pi))
+    (0.25 +. (asin 0.99 /. (2. *. Float.pi)))
     (Risk_engine.Options.phi2 0. 0. 0.99);
   let s, r, q = (522.35, 0.04, 0.005) in
   let n = 1000 in
@@ -1186,20 +1483,20 @@ let test_amer_accuracy () =
                   let k = s *. m in
                   let baw =
                     (Risk_engine.Options.baw ~s:[| s |] ~k ~t ~r:[| r |]
-                       ~b:[| r -. q |] ~sigma ~call).(0)
+                       ~b:[| r -. q |]
+                       ~sigma ~call).(0)
                   in
-                  let ref_ =
-                    crr_amer ~s ~k ~t ~r ~q ~sigma ~call ~n
-                  in
+                  let ref_ = crr_amer ~s ~k ~t ~r ~q ~sigma ~call ~n in
                   let scale = Float.max ref_ (0.01 *. s) in
                   let err = abs_float (baw -. ref_) /. scale in
                   if err > !worst then (
                     worst := err;
                     worst_at := ((if call then "C" else "P"), sigma, t, m));
                   rows :=
-                    (Printf.sprintf "%s sig=%.1f T=%.2f K/S=%.2f baw=%.4f crr=%.4f err=%.4f%%"
-                       (if call then "C" else "P")
-                       sigma t m baw ref_ (100. *. err))
+                    Printf.sprintf
+                      "%s sig=%.1f T=%.2f K/S=%.2f baw=%.4f crr=%.4f err=%.4f%%"
+                      (if call then "C" else "P")
+                      sigma t m baw ref_ (100. *. err)
                     :: !rows)
                 [ 0.7; 0.85; 1.0; 1.15 ])
             [ 0.08; 0.5 ])
@@ -1207,7 +1504,7 @@ let test_amer_accuracy () =
     [ true; false ];
   List.iter (fun l -> Printf.printf "  amer %s\n" l) (List.rev !rows);
   let tag =
-    fun (c, sg, t, m) -> Printf.sprintf "%s sig=%.1f T=%.2f K/S=%.2f" c sg t m
+   fun (c, sg, t, m) -> Printf.sprintf "%s sig=%.1f T=%.2f K/S=%.2f" c sg t m
   in
   Printf.printf "  amer worst: %.4f%% at %s\n" (100. *. !worst) (tag !worst_at);
   Alcotest.check Alcotest.bool "baw-within-2pct" true (!worst < 0.02);
@@ -1230,7 +1527,9 @@ let test_amer_accuracy () =
                     (Risk_engine.Options.baw ~s:[| s |] ~k ~t ~r:[| r |]
                        ~b:[| b |] ~sigma ~call).(0)
                   in
-                  let bs = Risk_engine.Options.bs2002_1 ~s ~k ~t ~r ~b ~sigma ~call in
+                  let bs =
+                    Risk_engine.Options.bs2002_1 ~s ~k ~t ~r ~b ~sigma ~call
+                  in
                   let ref_ = crr_amer ~s ~k ~t ~r ~q:qq ~sigma ~call ~n in
                   let scale = Float.max ref_ (0.01 *. s) in
                   let eb = abs_float (baw -. ref_) /. scale
@@ -1286,33 +1585,34 @@ let test_amer_accuracy () =
                     (Risk_engine.Options.baw ~s:[| s |] ~k ~t ~r:[| r |]
                        ~b:[| b |] ~sigma ~call).(0)
                   in
-                  let bs = Risk_engine.Options.bs2002_1 ~s ~k ~t ~r ~b ~sigma ~call in
+                  let bs =
+                    Risk_engine.Options.bs2002_1 ~s ~k ~t ~r ~b ~sigma ~call
+                  in
                   let ref_ = crr_amer ~s ~k ~t ~r ~q:qq ~sigma ~call ~n:ndeep in
                   let scale = Float.max ref_ (0.01 *. s) in
                   let eb = abs_float (baw -. ref_) /. scale
                   and es = abs_float (bs -. ref_) /. scale in
                   if eb > !wab then (
                     wab := eb;
-                    wat_ab :=
-                      atag
-                        (if call then "C" else "P")
-                        sigma r qq t m);
-                  if r > 0.01 then
-                    if eb > !wab_pos then wab_pos := eb;
+                    wat_ab := atag (if call then "C" else "P") sigma r qq t m);
+                  if r > 0.01 then if eb > !wab_pos then wab_pos := eb;
                   if es > !wsb then (
                     wsb := es;
-                    wat_sb :=
-                      atag
-                        (if call then "C" else "P")
-                        sigma r qq t m);
+                    wat_sb := atag (if call then "C" else "P") sigma r qq t m);
                   Printf.printf
                     "  abyss %s sig=%.2f r=%.2f q=%.2f T=%.2f K/S=%.2f \
                      baw=%.4f bs=%.4f crr=%.4f eb=%.4f%% es=%.4f%%\n"
                     (if call then "C" else "P")
                     sigma r qq t m baw bs ref_ (100. *. eb) (100. *. es))
                 [ 0.6; 0.8; 1.0 ])
-            [ (1.0, 0.02, 0.06); (3.0, 0.02, 0.06); (1.0, 0.0, 0.15);
-              (3.0, 0.0, 0.15); (1.0, 0.0, 0.25); (3.0, 0.0, 0.25) ])
+            [
+              (1.0, 0.02, 0.06);
+              (3.0, 0.02, 0.06);
+              (1.0, 0.0, 0.15);
+              (3.0, 0.0, 0.15);
+              (1.0, 0.0, 0.25);
+              (3.0, 0.0, 0.25);
+            ])
         [ 0.3; 0.5 ])
     [ true; false ];
   Printf.printf "  abyss baw worst: %.4f%% at %s\n" (100. *. !wab) !wat_ab;
@@ -1322,13 +1622,9 @@ let test_amer_accuracy () =
   Alcotest.check Alcotest.bool "bs-abyss" true (!wsb < 0.02)
 
 let find_reference () =
+  let exe_dir = try Filename.dirname Sys.executable_name with _ -> "." in
   let exe_dir =
-    try Filename.dirname Sys.executable_name
-    with _ -> "."
-  in
-  let exe_dir =
-    if Filename.is_relative exe_dir then
-      Filename.concat (Sys.getcwd ()) exe_dir
+    if Filename.is_relative exe_dir then Filename.concat (Sys.getcwd ()) exe_dir
     else exe_dir
   in
   let cands =
@@ -1365,9 +1661,9 @@ let test_optim_rosenbrock () =
 let test_optim_ssvi_scipy () =
   let open Yojson.Basic.Util in
   let j = Yojson.Basic.from_file (find_reference ()) in
-  let exp = j |> member "expiries" |> to_list |> List.map to_number |> Array.of_list
-  and k =
-    j |> member "k_grid" |> to_list |> List.map to_number |> Array.of_list
+  let exp =
+    j |> member "expiries" |> to_list |> List.map to_number |> Array.of_list
+  and k = j |> member "k_grid" |> to_list |> List.map to_number |> Array.of_list
   and obs =
     j |> member "obs_iv" |> to_list
     |> List.map (fun r -> r |> to_list |> List.map to_number |> Array.of_list)
@@ -1377,8 +1673,7 @@ let test_optim_ssvi_scipy () =
   let u0 =
     atm |> member "u0" |> to_list |> List.map to_number |> Array.of_list
   in
-  let tight =
-    atm |> member "scipy_nelder_mead_tight" in
+  let tight = atm |> member "scipy_nelder_mead_tight" in
   let ref_fun = tight |> member "fun" |> to_number
   and ref_u =
     tight |> member "u" |> to_list |> List.map to_number |> Array.of_list
@@ -1399,13 +1694,13 @@ let test_optim_ssvi_scipy () =
   in
   (* formula cross-check, independent of our optimizer: OCaml objective
      evaluated at scipy's optimum reproduces scipy's reported fun *)
-  Alcotest.check (Alcotest.float 1e-12) "formula-matches-scipy" ref_fun (obj ref_u);
-  let r =
-    Optim.nelder_mead ~maxiter:20000 ~xatol:1e-10 ~fatol:1e-14 obj u0
-  in
+  Alcotest.check (Alcotest.float 1e-12) "formula-matches-scipy" ref_fun
+    (obj ref_u);
+  let r = Optim.nelder_mead ~maxiter:20000 ~xatol:1e-10 ~fatol:1e-14 obj u0 in
   Alcotest.check Alcotest.bool "converged" true r.Optim.converged;
   Alcotest.check (Alcotest.float 1e-12) "matches-scipy" ref_fun r.Optim.f;
-  Alcotest.check Alcotest.bool "beats-or-matches" true (r.Optim.f <= ref_fun *. 1.000001);
+  Alcotest.check Alcotest.bool "beats-or-matches" true
+    (r.Optim.f <= ref_fun *. 1.000001);
   (* decoded optimum is admissible and fits to noise level *)
   let s = Ssvi.decode exp r.Optim.x in
   Alcotest.check Alcotest.bool "rho" true (abs_float s.Ssvi.rho < 1.);
@@ -1423,9 +1718,7 @@ let test_ssvi_atm () =
     (fun j _ ->
       let th = s.Ssvi.theta.(j) in
       let phi = Ssvi.phi_of ~theta:th ~eta:s.Ssvi.eta ~gamma:s.Ssvi.gamma in
-      let w =
-        Ssvi.w_of ~k:0. ~theta:th ~rho:s.Ssvi.rho ~phi
-      in
+      let w = Ssvi.w_of ~k:0. ~theta:th ~rho:s.Ssvi.rho ~phi in
       Alcotest.check eps "atm-identity" th w;
       let v = Ssvi.iv s ~k:0. ~t:ssvi_exp.(j) in
       Alcotest.check eps "atm-iv" (sqrt (th /. ssvi_exp.(j))) v)
@@ -1466,9 +1759,7 @@ let test_ssvi_bounds () =
     latents
 
 let test_ssvi_roundtrip () =
-  let u =
-    [| 0.5; -0.3; 0.1; 0.0; 0.2; 1.2; -0.7; 0.9 |]
-  in
+  let u = [| 0.5; -0.3; 0.1; 0.0; 0.2; 1.2; -0.7; 0.9 |] in
   let s = Ssvi.decode ssvi_exp u in
   let u2 = Ssvi.encode s in
   Array.iteri
@@ -1487,6 +1778,11 @@ let () =
           Alcotest.test_case "rejects" `Quick test_money_rejects;
           Alcotest.test_case "quantize" `Quick test_money_quantize;
           Alcotest.test_case "exact" `Quick test_money_exact;
+        ] );
+      ( "taxonomy",
+        [
+          Alcotest.test_case "roundtrip" `Quick test_taxonomy_roundtrip;
+          Alcotest.test_case "rejects" `Quick test_taxonomy_rejects;
         ] );
       ( "calendar",
         [
@@ -1522,6 +1818,13 @@ let () =
         [
           Alcotest.test_case "contract-ok" `Quick test_db_contract_ok;
           Alcotest.test_case "grid-reject" `Quick test_db_contract_grid_reject;
+        ] );
+      ("pricing", [ Alcotest.test_case "ws-reuse" `Quick test_ws_reuse ]);
+      ( "api",
+        [
+          Alcotest.test_case "roundtrip" `Quick test_api_roundtrip;
+          Alcotest.test_case "cancel" `Quick test_api_cancel;
+          Alcotest.test_case "routes" `Quick test_api_routes;
         ] );
       ( "csv",
         [
@@ -1563,8 +1866,7 @@ let () =
           Alcotest.test_case "pca" `Quick test_plat_pca;
           Alcotest.test_case "base" `Quick test_plat_base;
         ] );
-      ( "vol-e2e",
-        [ Alcotest.test_case "bootstrap" `Quick test_e2e_bootstrap ] );
+      ("vol-e2e", [ Alcotest.test_case "bootstrap" `Quick test_e2e_bootstrap ]);
       ( "surface-constraints",
         [
           Alcotest.test_case "valid" `Quick test_sc_valid;

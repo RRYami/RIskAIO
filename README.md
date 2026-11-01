@@ -26,9 +26,9 @@ scripts live outside the repo.
 | S6 | American engine: CRR-vs-BAW-vs-BS2002 shootout, BS-2002 wins | done |
 | — | `python/`: oracle/time scripts removed (out-of-repo); fixtures script kept | done |
 | P7a | zarith money (exact rational boundary, float64 core) | done |
-| P7b | full taxonomy (closed variant + terms validation) | planned |
+| P7b | full taxonomy (closed 9-type variant + terms validation) | done |
 | P7c | Postgres read contract (`db/schema.sql`, `lib/db`, USD curves + dividends) | done |
-| P7d | API/worker/DB persistence | planned |
+| P7d | API/worker/DB persistence (`lib/api`, `bin/api.exe`, `db/runs.sql`) | done |
 
 Oracle parity: the P3–P5 cross-language goldens (`oracle_*.json`) are consumed
 as data and the gated tests skip when they are absent. The scripts that
@@ -41,7 +41,7 @@ export PATH="$HOME/.local/bin:$PATH"   # opam lives here
 make switch   # one-time: opam switch create 5.3.0 (compiles OCaml, ~10 min)
 make deps     # dune, alcotest, yojson, ocamlformat, lacaml
 make build
-make test     # full suite: 73 tests across 4 binaries (no Python needed)
+make test     # full suite: 79 tests across 4 binaries (no Python needed)
 make parity   # fixtures + full suite with fixture-gated tests + engine check
 make perf-big # scaled probe: ~2000 positions (see PERF.md)
 ```
@@ -54,14 +54,37 @@ lib/engine/  config, stats, options, market, pricing, run, backtest,
              ssvi, surface_constraints, quotes, optim, ssvi_calibration,
              pca_latent
 lib/db/      Postgres read contract: v_* views → Marketdata.bundle (no DB dep)
+lib/api/     REST worker: jobs, memory/Postgres stores, service, HTTP routes
 db/          schema.sql: market_* tables + v_* contract views (Postgres)
+db/          runs.sql: risk_runs result archive (Postgres)
 bin/         risk-ai (check | parity), perf, surface (calibrate|recanon|run),
-             dev (book | price | bench-run — playground, non-production)
+             dev (book | price | bench-run — playground, non-production),
+             api (REST worker: POST/GET runs — production path)
 test/        alcotest suites: unit goldens, scipy cross-check, validator
              injections, CRR-vs-BAW-vs-BS2002 shootout, end-to-end bootstrap
 python/      export_fixtures.py only — deterministic universes (stdlib only)
 fixtures/    generated (gitignored); soxx-v1 is the real-data demo book
 ```
+
+## API worker (production path)
+
+`dune exec bin/api.exe -- --port 8080 [--db-url postgresql://...]` — REST +
+JSON over the same engine (memory store by default, Postgres via `db/runs.sql`
+migration when `--db-url` is given):
+
+```bash
+curl -s http://localhost:8080/health
+curl -s -X POST http://localhost:8080/api/runs \
+  -H 'content-type: application/json' -d @run.json   # 202 {id, status}
+curl -s http://localhost:8080/api/runs/RUN_ID        # status + rows + diagnostics
+curl -s 'http://localhost:8080/api/runs/RUN_ID/pnl?h=h1'
+curl -s -X DELETE http://localhost:8080/api/runs/RUN_ID   # cooperative cancel
+```
+
+`run.json` carries `{as_of, base_currency, holdings, instruments, marketdata,
+config, surf_fits?}` — the file-fixture shapes, so any parity fixture doubles
+as a request body. Results (rows, per-horizon P&L, diagnostics) persist as one
+JSONB document per run; market inputs are snapshotted by the caller.
 
 ## Dev playground (non-production diagnostics)
 

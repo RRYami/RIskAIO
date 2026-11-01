@@ -3,13 +3,81 @@
     Kept in core so the engine receives a materialised view without any database
     dependency (ADR-007 engine purity).
 
-    Engine-first note: [inst_type] stays a string until P3 pins the 9-type
-    taxonomy against the Q19 terms contract; [terms] is schemaless JSON until
-    then (the Python fixture exporter labels this [provisional-v1]). *)
+    P7b: [inst_type] is a closed 9-type variant; the JSON wire strings are
+    unchanged. Missing required terms fail at parse time via [validate_terms]
+    instead of surfacing deep inside pricing. *)
+
+(** The 9 supported instrument types (Q19 terms contract). *)
+type inst_type =
+  | Equity
+  | Etf
+  | Fund
+  | Future
+  | Listed_option
+  | Gov_bond
+  | Corp_bond
+  | Cash
+  | Fx_forward
+
+let inst_type_of_string = function
+  | "EQUITY" -> Equity
+  | "ETF" -> Etf
+  | "FUND" -> Fund
+  | "FUTURE" -> Future
+  | "LISTED_OPTION" -> Listed_option
+  | "GOV_BOND" -> Gov_bond
+  | "CORP_BOND" -> Corp_bond
+  | "CASH" -> Cash
+  | "FX_FORWARD" -> Fx_forward
+  | s -> invalid_arg ("unknown instrument type: " ^ s)
+
+let string_of_inst_type = function
+  | Equity -> "EQUITY"
+  | Etf -> "ETF"
+  | Fund -> "FUND"
+  | Future -> "FUTURE"
+  | Listed_option -> "LISTED_OPTION"
+  | Gov_bond -> "GOV_BOND"
+  | Corp_bond -> "CORP_BOND"
+  | Cash -> "CASH"
+  | Fx_forward -> "FX_FORWARD"
+
+(** Required terms per type (presence-checked; value validation stays in
+    pricing, which reports the holding row). Linear/cash need no terms. *)
+let required_terms = function
+  | Equity | Etf | Fund | Cash -> []
+  | Future -> [ "expiry"; "multiplier"; "underlying_instrument_id" ]
+  | Listed_option ->
+      [
+        "expiry";
+        "strike";
+        "call_put";
+        "style";
+        "multiplier";
+        "underlying_instrument_id";
+      ]
+  | Gov_bond | Corp_bond -> [ "maturity"; "coupon_rate"; "coupon_frequency" ]
+  | Fx_forward ->
+      [
+        "settlement_date";
+        "buy_currency";
+        "buy_notional";
+        "sell_currency";
+        "sell_notional";
+      ]
+
+let validate_terms ty terms =
+  List.iter
+    (fun k ->
+      if List.assoc_opt k terms = None then
+        invalid_arg
+          (Printf.sprintf "%s: missing required term %s"
+             (string_of_inst_type ty) k))
+    (required_terms ty)
 
 type instrument_record = {
   instrument_id : string;
-  inst_type : string;
+  inst_type : inst_type;
   currency : string;
   terms : (string * Yojson.Basic.t) list;
   overlay : bool;
@@ -45,11 +113,14 @@ let find_instrument v id = List.assoc_opt id v.instruments
 open Yojson.Basic.Util
 
 let instrument_record_of_yojson j =
+  let ty = inst_type_of_string (j |> member "type" |> to_string) in
+  let terms = j |> member "terms" |> to_assoc in
+  validate_terms ty terms;
   {
     instrument_id = j |> member "instrument_id" |> to_string;
-    inst_type = j |> member "type" |> to_string;
+    inst_type = ty;
     currency = j |> member "currency" |> to_string;
-    terms = j |> member "terms" |> to_assoc;
+    terms;
     overlay =
       (match j |> member "overlay" with `Null -> false | b -> to_bool b);
     base_instrument_id =

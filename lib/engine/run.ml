@@ -184,9 +184,9 @@ type vol_env = {
   pc : (string * Pca_latent.pca) list;
 }
 
-(** Build the vol environment from dated fits; [None] = frozen vol.
-    Raises [Engine_config_error] on missing/short histories — never a
-    silent fallback to frozen. *)
+(** Build the vol environment from dated fits; [None] = frozen vol. Raises
+    [Engine_config_error] on missing/short histories — never a silent fallback
+    to frozen. *)
 let vol_env_of_inputs inputs (config : Config.run_config) =
   match config.vol_model with
   | Config.Frozen -> None
@@ -197,10 +197,11 @@ let vol_env_of_inputs inputs (config : Config.run_config) =
             (fun u ->
               match List.assoc_opt u inputs.surf_fits with
               | None ->
-                  raise
-                    (Engine_config_error ("vol: no surface fits for " ^ u))
+                  raise (Engine_config_error ("vol: no surface fits for " ^ u))
               | Some fits ->
-                  (u, Pca_latent.of_fits (List.map (fun f -> Ssvi_calibration.Ok f) fits)))
+                  ( u,
+                    Pca_latent.of_fits
+                      (List.map (fun f -> Ssvi_calibration.Ok f) fits) ))
             config.vol_universe
         in
         let pc =
@@ -216,12 +217,11 @@ let vol_env_of_inputs inputs (config : Config.run_config) =
         Some { lat; pc }
       with Invalid_argument msg -> raise (Engine_config_error ("vol: " ^ msg)))
 
-(** Per-scenario latent states per surfaced underlying (n_scen × p),
-    plus fallback count (scenarios reusing the base surface).
-    Historical+Bootstrap pairs each history row with the latent diff of its
-    own return date (exact dependence, plan §9A). Montecarlo+Gaussian draws
-    jointly with the (curve-reduced) market factors over date-aligned rows
-    (plan §9B). *)
+(** Per-scenario latent states per surfaced underlying (n_scen × p), plus
+    fallback count (scenarios reusing the base surface). Historical+Bootstrap
+    pairs each history row with the latent diff of its own return date (exact
+    dependence, plan §9A). Montecarlo+Gaussian draws jointly with the
+    (curve-reduced) market factors over date-aligned rows (plan §9B). *)
 let vol_states_hist env ~as_of return_dates n =
   let fallback = ref 0 in
   let states =
@@ -284,7 +284,7 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
         weights,
         ("n_scenarios", `Int (Array.length factors.history)) :: vdiag,
         states )
-  | Config.Montecarlo ->
+  | Config.Montecarlo -> (
       if Market.size factors = 0 then
         ( Array.make_matrix config.n_scenarios 0 0.,
           None,
@@ -319,7 +319,7 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
             ],
             [] )
         in
-        (match vol with
+        match vol with
         | None -> frozen_path ()
         | Some _ when config.vol_model = Config.Frozen -> frozen_path ()
         | Some env -> (
@@ -327,8 +327,7 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
             | Config.Frozen -> assert false
             | Config.Bootstrap ->
                 raise
-                  (Engine_config_error
-                     "vol: Bootstrap needs method=historical")
+                  (Engine_config_error "vol: Bootstrap needs method=historical")
             | Config.Gaussian ->
                 let as_of = need_as_of () in
                 (* date-aligned rows across factors and every surface *)
@@ -342,13 +341,12 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
                   Array.init (Array.length factors.history) Fun.id
                   |> Array.to_list
                   |> List.filter (fun i ->
-                         in_all (Calendar.to_string factors.return_dates.(i)))
+                      in_all (Calendar.to_string factors.return_dates.(i)))
                 in
                 if aligned = [] then
                   raise
                     (Engine_config_error
-                       "vol: no date overlap between factors and surface \
-                        fits");
+                       "vol: no date overlap between factors and surface fits");
                 let per_u =
                   List.map
                     (fun (u, (lat : Pca_latent.latent_set)) ->
@@ -359,8 +357,7 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
                             let d =
                               Option.get
                                 (Pca_latent.diff_of_date lat
-                                   (Calendar.to_string
-                                      factors.return_dates.(i)))
+                                   (Calendar.to_string factors.return_dates.(i)))
                             in
                             Pca_latent.scores pc d)
                           aligned
@@ -400,7 +397,10 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
                 in
                 let states =
                   List.map
-                    (fun (u, (lat : Pca_latent.latent_set), (pc : Pca_latent.pca), _) ->
+                    (fun ( u,
+                           (lat : Pca_latent.latent_set),
+                           (pc : Pca_latent.pca),
+                           _ ) ->
                       let base = Pca_latent.base_state lat ~as_of in
                       let p = Array.length base in
                       let off = List.assoc u offsets in
@@ -411,8 +411,8 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
                                 for j = 0 to pc.Pca_latent.k - 1 do
                                   s :=
                                     !s
-                                    +. (pc.Pca_latent.loadings.(a).(j)
-                                       *. draws.(r).(off + j))
+                                    +. pc.Pca_latent.loadings.(a).(j)
+                                       *. draws.(r).(off + j)
                                 done;
                                 base.(a) +. !s))
                       in
@@ -427,12 +427,12 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
                           [
                             ("pcs", `Int pc.Pca_latent.k);
                             ("explained", `Float pc.Pca_latent.explained);
-                            ("residual_share", `Float pc.Pca_latent.residual_share);
+                            ( "residual_share",
+                              `Float pc.Pca_latent.residual_share );
                           ] ))
                     per_u
                 in
-                ( expand
-                    (Array.map (fun row -> Array.sub row 0 rd) draws),
+                ( expand (Array.map (fun row -> Array.sub row 0 rd) draws),
                   None,
                   [
                     ("n_scenarios", `Int config.n_scenarios);
@@ -449,13 +449,13 @@ let one_day_shocks (factors : Market.factor_set) (config : Config.run_config)
                   @ vdiag,
                   states )))
 
-(** Per-scenario sigma matrix (n_scen × book.options order) from latent
-    states, plus the count of options past the last expiry knot (flat
-    theta extrapolation — the documented boundary policy, §6.4).
-    Non-surfaced underlyings and expired options keep [o.sigma]. *)
+(** Per-scenario sigma matrix (n_scen × book.options order) from latent states,
+    plus the count of options past the last expiry knot (flat theta
+    extrapolation — the documented boundary policy, §6.4). Non-surfaced
+    underlyings and expired options keep [o.sigma]. *)
 let vol_sigmas (pricer : Pricing.pricer) (factors : Market.factor_set)
-    (states : (string * float array array) list)
-    (env : vol_env) shocks ~h ~scale =
+    (states : (string * float array array) list) (env : vol_env) shocks ~h
+    ~scale =
   match pricer.Pricing.book.Pricing.options with
   | [] -> (None, 0)
   | opts ->
@@ -470,8 +470,7 @@ let vol_sigmas (pricer : Pricing.pricer) (factors : Market.factor_set)
                 | None -> o.Pricing.sigma
                 | Some u_arr -> (
                     let t_rem =
-                      float_of_int
-                        (Int.max (o.Pricing.days_to_expiry - h) 0)
+                      float_of_int (Int.max (o.Pricing.days_to_expiry - h) 0)
                       /. 252.
                     in
                     if t_rem <= 0. then o.Pricing.sigma
@@ -480,12 +479,14 @@ let vol_sigmas (pricer : Pricing.pricer) (factors : Market.factor_set)
                       let t_use =
                         if
                           t_rem
-                          > lat.Pca_latent.expiries
-                             .(Array.length lat.Pca_latent.expiries - 1)
+                          > lat.Pca_latent.expiries.(Array.length
+                                                       lat.Pca_latent.expiries
+                                                     - 1)
                         then (
                           incr clamped;
-                          lat.Pca_latent.expiries
-                            .(Array.length lat.Pca_latent.expiries - 1))
+                          lat.Pca_latent.expiries.(Array.length
+                                                     lat.Pca_latent.expiries
+                                                   - 1))
                         else t_rem
                       in
                       let surf =
@@ -519,8 +520,8 @@ let vol_sigmas (pricer : Pricing.pricer) (factors : Market.factor_set)
                         s *. exp ((!rr -. o.Pricing.dividend_yield) *. t_rem)
                       in
                       let k = Float.log (o.Pricing.strike /. fwd) in
-                      (try Ssvi.iv surf ~k ~t:t_use
-                       with Ssvi.Ssvi_error _ -> o.Pricing.sigma))))
+                      try Ssvi.iv surf ~k ~t:t_use
+                      with Ssvi.Ssvi_error _ -> o.Pricing.sigma)))
       in
       (Some mat, !clamped)
 
@@ -536,7 +537,8 @@ let n_domains () =
     write disjoint slices of [total], so multi-domain execution is bit-identical
     to sequential. The bond-roll cache is warmed up front: [Hashtbl] mutation is
     not domain-safe. *)
-let total_pnl pricer v0 shocks h chunk should_cancel scale ?(vol_sigma = None) () =
+let total_pnl pricer v0 shocks h chunk should_cancel scale ?(vol_sigma = None)
+    () =
   let n = Array.length shocks in
   let v0_sum = Array.fold_left ( +. ) 0. v0 in
   let total = Array.make n 0. in
@@ -548,9 +550,7 @@ let total_pnl pricer v0 shocks h chunk should_cancel scale ?(vol_sigma = None) (
     let out = Pricing.ws_out pricer (hi - lo) in
     (* vol_sigma is absolute-indexed; slice to the chunk window *)
     let vs =
-      Option.map
-        (fun m -> Array.init (hi - lo) (fun r -> m.(lo + r)))
-        vol_sigma
+      Option.map (fun m -> Array.init (hi - lo) (fun r -> m.(lo + r))) vol_sigma
     in
     Pricing.values_into pricer shocks ~lo ~hi ~horizon_days:h ~vol_shift:[]
       ~scale ~vol_sigma:vs ~out ();
@@ -855,7 +855,9 @@ let exposure_rows pricer (book : Pricing.book) =
   List.iter
     (fun (p : Pricing.position_info) ->
       let key = p.instrument_id and i = p.index in
-      let meta = [ ("type", `String p.inst_type) ] in
+      let meta =
+        [ ("type", `String (Refdata.string_of_inst_type p.inst_type)) ]
+      in
       push
         {
           view = "exposures";
@@ -876,7 +878,7 @@ let exposure_rows pricer (book : Pricing.book) =
           value = e.exposure.(i);
           value_currency = Some base;
         };
-      if p.inst_type = "LISTED_OPTION" then
+      if p.inst_type = Refdata.Listed_option then
         push
           {
             view = "exposures";
@@ -1078,8 +1080,8 @@ let run_engine (inputs : engine_inputs) (config : Config.run_config)
       in
       batches :=
         components pricer book v0 one_day scale total h
-          config.component_confidence weights cmeta dims
-          ~vol_sigma_full:vsigma ()
+          config.component_confidence weights cmeta dims ~vol_sigma_full:vsigma
+          ()
         :: !batches)
     (List.sort_uniq Int.compare config.horizons);
   batches := exposure_rows pricer book :: !batches;
@@ -1089,25 +1091,26 @@ let run_engine (inputs : engine_inputs) (config : Config.run_config)
     ("vol_model", `String (Config.vol_model_to_string config.vol_model))
     :: ("vol_pcs", `Int config.vol_pcs)
     :: ("vol_clamped_options", `Int !n_clamped)
-    :: (match venv with
-       | None -> []
-       | Some env ->
-           ("vol_universe", `List (List.map (fun s -> `String s) config.vol_universe))
-           :: List.map
-                (fun (u, (pc : Pca_latent.pca)) ->
-                  ( "vol_" ^ u,
-                    `Assoc
-                      [
-                        ("pcs", `Int pc.Pca_latent.k);
-                        ("explained", `Float pc.Pca_latent.explained);
-                        ("residual_share", `Float pc.Pca_latent.residual_share);
-                      ] ))
-                env.pc
-           @ List.map
-               (fun (u, (lat : Pca_latent.latent_set)) ->
-                 ( "vol_n_diffs_" ^ u,
-                   `Int (Array.length lat.Pca_latent.d_hist) ))
-               env.lat)
+    ::
+    (match venv with
+    | None -> []
+    | Some env ->
+        ( "vol_universe",
+          `List (List.map (fun s -> `String s) config.vol_universe) )
+        :: List.map
+             (fun (u, (pc : Pca_latent.pca)) ->
+               ( "vol_" ^ u,
+                 `Assoc
+                   [
+                     ("pcs", `Int pc.Pca_latent.k);
+                     ("explained", `Float pc.Pca_latent.explained);
+                     ("residual_share", `Float pc.Pca_latent.residual_share);
+                   ] ))
+             env.pc
+        @ List.map
+            (fun (u, (lat : Pca_latent.latent_set)) ->
+              ("vol_n_diffs_" ^ u, `Int (Array.length lat.Pca_latent.d_hist)))
+            env.lat)
   in
   let diag =
     diag @ vdiag

@@ -1,13 +1,13 @@
 SWITCH ?= 5.3.0
 DUNE := opam exec --switch=$(SWITCH) -- dune
 
-.PHONY: switch deps build test test-unit fixtures parity fmt clean
+.PHONY: switch deps build test test-unit fixtures parity api fmt clean
 
 switch: # one-time: create the OCaml 5.3.0 opam switch
 	opam switch create $(SWITCH) ocaml-base-compiler.5.3.0
 
 deps: # install build + test deps into the switch (no sudo needed)
-	opam install --switch=$(SWITCH) dune alcotest yojson ocamlformat lacaml
+	opam install --switch=$(SWITCH) --assume-depexts dune alcotest yojson ocamlformat lacaml zarith lwt cohttp-lwt-unix caqti caqti-lwt caqti-driver-postgresql
 
 build:
 	$(DUNE) build
@@ -26,6 +26,9 @@ fixtures: # regenerate the deterministic mini universe (stdlib-only python)
 parity: build fixtures
 	RISK_AI_FIXTURES=$(CURDIR)/fixtures/mini-v1 $(DUNE) runtest --force
 	$(DUNE) exec bin/main.exe -- parity --fixture fixtures/mini-v1
+
+api: build # REST worker (memory store; --db-url postgresql://... for Postgres)
+	$(DUNE) exec bin/api.exe -- --port 8080
 
 perf: build # scaled probe: 190-instrument fixture + timings (see PERF.md)
 	python3 python/export_fixtures.py --out fixtures/perf-v1 --seed 7 --equities 60 --days 550

@@ -20,8 +20,8 @@ exception Book_error of string list
 exception Spec_error of string
 (** internal: one holding is unpriceable *)
 
-let linear_types = [ "EQUITY"; "ETF"; "FUND" ]
-let bond_types = [ "GOV_BOND"; "CORP_BOND" ]
+let linear_types = [ Refdata.Equity; Refdata.Etf; Refdata.Fund ]
+let bond_types = [ Refdata.Gov_bond; Refdata.Corp_bond ]
 let year_days = 365.
 let trading_days = 252.
 
@@ -37,7 +37,7 @@ let rowdot a v =
 type position_info = {
   index : int;
   instrument_id : string;
-  inst_type : string;
+  inst_type : Refdata.inst_type;
   currency : string;
   quantity : float;
   issuer : string;
@@ -208,8 +208,10 @@ let dims (inst : Refdata.instrument_record) under =
     | _ -> ""
   in
   let or_ v fb = if v = "" then fb () else v in
-  ( or_ (get "issuer") (fun () -> inst.inst_type ^ ":" ^ inst.currency),
-    or_ (get "sector") (fun () -> String.lowercase_ascii inst.inst_type),
+  ( or_ (get "issuer") (fun () ->
+        Refdata.string_of_inst_type inst.inst_type ^ ":" ^ inst.currency),
+    or_ (get "sector") (fun () ->
+        String.lowercase_ascii (Refdata.string_of_inst_type inst.inst_type)),
     or_ (get "country") (fun () -> "n/a") )
 
 let need_term ok what = if not ok then raise (Spec_error what)
@@ -226,7 +228,7 @@ let add_spec (book : book) pos (inst : Refdata.instrument_record)
   if List.mem inst.inst_type linear_types then (
     ignore (state_find "price" state.prices key);
     { book with linear = book.linear @ [ (pos, key, qty) ] })
-  else if inst.inst_type = "FUTURE" then (
+  else if inst.inst_type = Refdata.Future then (
     let under =
       match under with
       | None -> raise (Spec_error "future without underlying")
@@ -250,7 +252,7 @@ let add_spec (book : book) pos (inst : Refdata.instrument_record)
       }
     in
     { book with futures = book.futures @ [ spec ] })
-  else if inst.inst_type = "LISTED_OPTION" then (
+  else if inst.inst_type = Refdata.Listed_option then (
     let under =
       match under with
       | None -> raise (Spec_error "option without underlying")
@@ -291,8 +293,9 @@ let add_spec (book : book) pos (inst : Refdata.instrument_record)
       }
     in
     { book with bonds = book.bonds @ [ spec ] }
-  else if inst.inst_type = "CASH" then { book with cash = book.cash @ [ pos ] }
-  else if inst.inst_type = "FX_FORWARD" then (
+  else if inst.inst_type = Refdata.Cash then
+    { book with cash = book.cash @ [ pos ] }
+  else if inst.inst_type = Refdata.Fx_forward then (
     let settle = Calendar.of_string (term_string t "settlement_date") in
     if Calendar.compare settle state.as_of <= 0 then
       raise (Spec_error ("settled on " ^ Calendar.to_string settle));
@@ -311,7 +314,10 @@ let add_spec (book : book) pos (inst : Refdata.instrument_record)
       }
     in
     { book with fx_forwards = book.fx_forwards @ [ spec ] })
-  else raise (Spec_error ("unsupported type " ^ inst.inst_type))
+  else
+    raise
+      (Spec_error
+         ("unsupported type " ^ Refdata.string_of_inst_type inst.inst_type))
 
 let build_book (holdings : Holdings.holding_row list)
     (instruments : (string * Refdata.instrument_record) list)
@@ -339,19 +345,21 @@ let build_book (holdings : Holdings.holding_row list)
           problems := !problems @ [ iid ^ ": not in the pinned secmaster view" ]
       | Some inst -> (
           let under =
-            if inst.inst_type = "FUTURE" || inst.inst_type = "LISTED_OPTION"
-            then
-              let ukey = term_string inst.terms "underlying_instrument_id" in
-              match List.assoc_opt ukey instruments with
-              | None ->
-                  problems :=
-                    !problems @ [ iid ^ ": underlying " ^ ukey ^ " unknown" ];
-                  None
-              | Some u -> Some u
-            else None
+            match inst.inst_type with
+            | Refdata.Future | Refdata.Listed_option -> (
+                let ukey = term_string inst.terms "underlying_instrument_id" in
+                match List.assoc_opt ukey instruments with
+                | None ->
+                    problems :=
+                      !problems @ [ iid ^ ": underlying " ^ ukey ^ " unknown" ];
+                    None
+                | Some u -> Some u)
+            | _ -> None
           in
           let under_missing =
-            (inst.inst_type = "FUTURE" || inst.inst_type = "LISTED_OPTION")
+            (match inst.inst_type with
+              | Refdata.Future | Refdata.Listed_option -> true
+              | _ -> false)
             && under = None
           in
           if not under_missing then
@@ -391,14 +399,16 @@ let build_book (holdings : Holdings.holding_row list)
                   !problems
                   @ [
                       Printf.sprintf "%s (%s, holding row %d): %s" iid
-                        inst.inst_type idx msg;
+                        (Refdata.string_of_inst_type inst.inst_type)
+                        idx msg;
                     ]
             | Calendar.Invalid_date msg ->
                 problems :=
                   !problems
                   @ [
                       Printf.sprintf "%s (%s, holding row %d): %s" iid
-                        inst.inst_type idx msg;
+                        (Refdata.string_of_inst_type inst.inst_type)
+                        idx msg;
                     ]))
     holdings;
   List.iter
@@ -555,20 +565,26 @@ let roll pricer h =
 
 type workspace = { mutable out : float array array }
 (** Per-domain scratch buffers (P7): reused across chunks so big runs stop
-    churning the major heap. Sized up on demand, never shrunk; each domain warms
-    its own via [Domain.DLS]. *)
+    churning the major heap. Sized exactly per call — never reused across
+    different shapes — since readers fold over physical rows; a wider leftover
+    buffer from another book would silently corrupt totals (the P7d server runs
+    many books in one process). Each domain warms its own via [Domain.DLS]. *)
 
 let workspace_key : workspace Domain.DLS.key =
   Domain.DLS.new_key (fun () -> { out = [||] })
 
 let domain_workspace () = Domain.DLS.get workspace_key
 
-(** [(hi-lo) × n_pos] scratch output, reused across calls. *)
+(** [n × n_pos] scratch output, reused across same-shape calls. Exact-size: any
+    shape change reallocates. *)
 let ws_out pricer n =
   let ws = domain_workspace () in
   let a = ws.out in
-  if Array.length a < n || (n > 0 && Array.length a.(0) < pricer.n_pos) then (
-    ws.out <- Array.make_matrix n pricer.n_pos 0.;
+  let cols_ok =
+    n = 0 || (Array.length a > 0 && Array.length a.(0) = pricer.n_pos)
+  in
+  if Array.length a <> n || not cols_ok then (
+    ws.out <- (if n = 0 then [||] else Array.make_matrix n pricer.n_pos 0.);
     ws.out)
   else a
 
@@ -620,7 +636,7 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
     pricer.book.futures
     (Array.to_list pricer.fut_f0);
   List.iteri
-      (fun oi (o : option_spec) ->
+    (fun oi (o : option_spec) ->
       let eq_j = Market.eq pricer.factors o.underlying in
       let s0 = List.assoc o.underlying pricer.state.Market.prices in
       let t =
@@ -648,9 +664,7 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
       let sg =
         Array.init n (fun r ->
             Float.max
-              ((match vol_sigma with
-               | None -> o.sigma
-               | Some m -> m.(r).(oi))
+              ((match vol_sigma with None -> o.sigma | Some m -> m.(r).(oi))
               +. base_shift)
               1e-6)
       in
@@ -801,8 +815,9 @@ let exposures pricer =
   in
   List.iter
     (fun (info : position_info) ->
-      if info.inst_type <> "FUTURE" && info.inst_type <> "FX_FORWARD" then
-        add info.currency exposure.(info.index))
+      if
+        info.inst_type <> Refdata.Future && info.inst_type <> Refdata.Fx_forward
+      then add info.currency exposure.(info.index))
     pricer.book.positions;
   List.iter
     (fun (fwd : fx_forward_spec) ->

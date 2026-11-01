@@ -1,0 +1,4 @@
+(library
+ (name risk_api)
+ (public_name risk-ai.api)
+ (libraries risk_core risk_engine yojson lwt lwt.unix cohttp-lwt-unix caqti caqti.classic caqti-lwt caqti-lwt.unix caqti-driver-postgresql))

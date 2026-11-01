@@ -9,6 +9,11 @@ depends: [
   "yojson" {>= "2.0"}
   "lacaml" {>= "11.0"}
   "zarith" {>= "1.12"}
+  "lwt" {>= "5.0"}
+  "cohttp-lwt-unix" {>= "6.0"}
+  "caqti" {>= "2.0"}
+  "caqti-lwt" {>= "2.0"}
+  "caqti-driver-postgresql" {>= "2.0"}
   "alcotest" {>= "1.8" & with-test}
   "ocamlformat" {>= "0.27" & with-dev-setup}
   "odoc" {with-doc}
