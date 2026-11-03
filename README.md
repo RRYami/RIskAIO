@@ -103,6 +103,10 @@ dev.exe option --style american --right put --spot 100 --strike 110 \
 `bench-run` prints per-stage wall time plus minor/major allocation, live heap
 and peak RSS, so repricing cost and allocation churn are visible per change.
 
+Option-pricing microbench (100k evals, `perf --amer 20 5000`; see PERF.md):
+European Black 1.37 µs/eval, American BS-2002 ~108 µs/eval (bivariate-normal
+quadrature per eval — the accuracy winner, not the speed winner).
+
 ## Deliberate divergences from Python
 
 * **No Parquet** (no mature OCaml lib): fixtures are JSON/CSV with identical

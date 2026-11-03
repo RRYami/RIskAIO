@@ -31,6 +31,26 @@ let amer_workload nopt nscen =
       let b = Array.make nscen 0.02 in
       (s, k, t, r, b, sigma, call))
 
+let peak_rss_kb () =
+  try
+    let ic = open_in "/proc/self/status" in
+    let rec go () =
+      match input_line ic with
+      | line -> (
+          match String.split_on_char ':' line with
+          | [ k; v ] when String.trim k = "VmHWM" -> (
+              close_in ic;
+              match String.split_on_char ' ' (String.trim v) with
+              | n :: _ -> Some (int_of_string (String.trim n))
+              | [] -> None)
+          | _ -> go ())
+      | exception End_of_file ->
+          close_in ic;
+          None
+    in
+    go ()
+  with _ -> None
+
 let () =
   let fixture = ref ""
   and mc = ref 10_000
@@ -175,6 +195,7 @@ let () =
   | None -> Printf.printf "mc var99/1d: MISSING\n%!"
   | Some r -> Printf.printf "mc var99/1d: %.2f\n%!" r.value);
   let workload = amer_workload !nopt !nscen in
+  let g0 = Gc.stat () in
   let t0 = Unix.gettimeofday () in
   let checksum = ref 0. in
   List.iter
@@ -183,8 +204,35 @@ let () =
       Array.iter (fun v -> checksum := !checksum +. v) px)
     workload;
   let dt = Unix.gettimeofday () -. t0 in
+  let g1 = Gc.stat () in
   let evals = !nopt * !nscen in
+  let minor_mb = (g1.minor_words -. g0.minor_words) *. 8. /. 1048576.
+  and major_mb = (g1.major_words -. g0.major_words) *. 8. /. 1048576. in
   Printf.printf "%-28s %8.3f s  (%d evals, %.2f us/eval, checksum %.6f)\n%!"
     "bs2002 microbench" dt evals
     (dt *. 1e6 /. float_of_int evals)
-    !checksum
+    !checksum;
+  Printf.printf "%-28s minor=%7.1fMB major=%7.1fMB%s\n%!" "bs2002 alloc"
+    minor_mb major_mb
+    (match peak_rss_kb () with
+    | None -> ""
+    | Some kb -> Printf.sprintf " peak_rss=%dMB" (kb / 1024));
+  (* European Black on the same grid: the cheap path every non-American
+     option takes in production. *)
+  let g2 = Gc.stat () in
+  let t2 = Unix.gettimeofday () in
+  let checksum_e = ref 0. in
+  List.iter
+    (fun (s, k, t, r, b, sigma, call) ->
+      let px = Options.black_scholes ~s ~k ~t ~r ~b ~sigma ~call in
+      Array.iter (fun v -> checksum_e := !checksum_e +. v) px)
+    workload;
+  let dt_e = Unix.gettimeofday () -. t2 in
+  let g3 = Gc.stat () in
+  Printf.printf "%-28s %8.3f s  (%d evals, %.2f us/eval, checksum %.6f)\n%!"
+    "black microbench" dt_e evals
+    (dt_e *. 1e6 /. float_of_int evals)
+    !checksum_e;
+  Printf.printf "%-28s minor=%7.1fMB major=%7.1fMB\n%!" "black alloc"
+    ((g3.minor_words -. g2.minor_words) *. 8. /. 1048576.)
+    ((g3.major_words -. g2.major_words) *. 8. /. 1048576.)

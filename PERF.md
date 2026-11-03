@@ -23,11 +23,24 @@ same workloads, both engines, wall clock.
 | build_factors | (in run) | 0.18 s | after fix 2 below |
 | run historical (259 scen) | 0.87 s | 1.13 s | 1.3× |
 | run MC 10k | 3.48 s | 57.4 s → **21.6 s** (OpenBLAS) → **18.1 s** (8 domains) | see below |
-| BAW micro (100k evals) | 0.085 s (0.85 µs) | 0.054 s (0.54 µs) | **OCaml 1.6× faster** |
+| black micro (100k evals) | — | 0.137 s (**1.37 µs/eval**, 0.86 KB/eval minor) | European path |
+| bs2002 micro (100k evals) | — | 10.8 s (**~108 µs/eval**, 24.8 KB/eval minor) | American path |
 
 Agreement at scale: hist VaR99/1d **235662.57 = 235662.57**; BAW checksums
 identical; MC VaR99/1d 329321 vs 325917 (~1% — different RNG streams, n = 10k
 sampling noise, expected).
+
+Option-pricing microbench (deterministic 20-option × 5000-scenario grid,
+`perf --amer 20 5000`; checksums stable run-to-run: black 1452485.380196,
+bs2002 1467663.520710): European Black costs 1.37 µs and 0.86 KB per eval —
+the cheap path every non-American option takes. BS-2002 costs ~108 µs and
+~25 KB per eval (~80× Black): each eval runs several bivariate-normal
+quadratures (20-point DW/Genz central branch, ~40 `exp` each) plus adaptive
+Simpson on the quadrature fringe. That cost is why BS-2002 won on accuracy,
+not speed — it validates at ≤1.7% vs 1000-step CRR across the book envelope
+(q to 25%, r to 0%, T to 3y), where BAW's `1−exp(−rT)` divide breaks down.
+Allocation is minor-heap only (~1 MB major per 100k evals), so no GC pauses;
+`bs2002 alloc` also reports process peak RSS for context.
 
 Small book for reference: historical 0.074 vs 0.255 s; MC 10k 0.448 vs
 2.708 s; BAW 1.06 vs 0.57 µs/eval.
