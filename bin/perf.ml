@@ -235,4 +235,44 @@ let () =
     !checksum_e;
   Printf.printf "%-28s minor=%7.1fMB major=%7.1fMB\n%!" "black alloc"
     ((g3.minor_words -. g2.minor_words) *. 8. /. 1048576.)
-    ((g3.major_words -. g2.major_words) *. 8. /. 1048576.)
+    ((g3.major_words -. g2.major_words) *. 8. /. 1048576.);
+  (* Multi-domain BS-2002 over the same workload: per-eval independence makes
+     the split trivially bit-identical (checksums must match the sequential
+     run above). Domain count follows RISK_AI_DOMAINS, as in production. *)
+  let domains = Run.n_domains () in
+  let eval_one (s, k, t, r, b, sigma, call) =
+    let px = Options.bs2002 ~s ~k ~t ~r ~b ~sigma ~call in
+    Array.fold_left ( +. ) 0. px
+  in
+  let arr = Array.of_list workload in
+  let n = Array.length arr in
+  let d = Int.max 1 domains in
+  let groups =
+    List.init d (fun i ->
+        let lo = i * n / d and hi = (i + 1) * n / d in
+        Array.sub arr lo (hi - lo) |> Array.to_list)
+    |> List.filter (fun g -> g <> [])
+  in
+  let g4 = Gc.stat () in
+  let t4 = Unix.gettimeofday () in
+  let workers =
+    List.map
+      (fun g ->
+        Domain.spawn (fun () ->
+            List.fold_left (fun acc w -> acc +. eval_one w) 0. g))
+      (match groups with [] -> [] | _ :: rest -> rest)
+  in
+  let mt_sum =
+    (match groups with
+      | [] -> 0.
+      | first :: _ -> List.fold_left (fun acc w -> acc +. eval_one w) 0. first)
+    +. List.fold_left (fun acc w -> acc +. Domain.join w) 0. workers
+  in
+  let dt_mt = Unix.gettimeofday () -. t4 in
+  let g5 = Gc.stat () in
+  Printf.printf
+    "%-28s %8.3f s  (%d evals, %d domains, %.2fx, checksum %.6f)\n%!"
+    "bs2002 microbench-mt" dt_mt evals domains (dt /. dt_mt) mt_sum;
+  Printf.printf "%-28s minor=%7.1fMB major=%7.1fMB\n%!" "bs2002-mt alloc"
+    ((g5.minor_words -. g4.minor_words) *. 8. /. 1048576.)
+    ((g5.major_words -. g4.major_words) *. 8. /. 1048576.)

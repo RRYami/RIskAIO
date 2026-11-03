@@ -104,8 +104,8 @@ dev.exe option --style american --right put --spot 100 --strike 110 \
 and peak RSS, so repricing cost and allocation churn are visible per change.
 
 Option-pricing microbench (100k evals, `perf --amer 20 5000`; see PERF.md):
-European Black 1.37 µs/eval, American BS-2002 ~108 µs/eval (bivariate-normal
-quadrature per eval — the accuracy winner, not the speed winner).
+European Black 1.37 µs/eval, American BS-2002 ~108 µs/eval single-domain
+(~34 µs/eval across 8 domains, checksum-identical).
 
 ## Deliberate divergences from Python
 

@@ -24,7 +24,8 @@ same workloads, both engines, wall clock.
 | run historical (259 scen) | 0.87 s | 1.13 s | 1.3× |
 | run MC 10k | 3.48 s | 57.4 s → **21.6 s** (OpenBLAS) → **18.1 s** (8 domains) | see below |
 | black micro (100k evals) | — | 0.137 s (**1.37 µs/eval**, 0.86 KB/eval minor) | European path |
-| bs2002 micro (100k evals) | — | 10.8 s (**~108 µs/eval**, 24.8 KB/eval minor) | American path |
+| bs2002 micro (100k evals) | — | 10.8 s (**~108 µs/eval**, 24.8 KB/eval minor) | American path, 1 domain |
+| bs2002 micro-mt (100k evals) | — | 3.4 s (**3.2× on 8 domains**, checksum-identical) | American path, `RISK_AI_DOMAINS` |
 
 Agreement at scale: hist VaR99/1d **235662.57 = 235662.57**; BAW checksums
 identical; MC VaR99/1d 329321 vs 325917 (~1% — different RNG streams, n = 10k
@@ -40,7 +41,11 @@ Simpson on the quadrature fringe. That cost is why BS-2002 won on accuracy,
 not speed — it validates at ≤1.7% vs 1000-step CRR across the book envelope
 (q to 25%, r to 0%, T to 3y), where BAW's `1−exp(−rT)` divide breaks down.
 Allocation is minor-heap only (~1 MB major per 100k evals), so no GC pauses;
-`bs2002 alloc` also reports process peak RSS for context.
+`bs2002 alloc` also reports process peak RSS for context. Per-eval
+independence makes the workload embarrassingly parallel: the `-mt` pass splits
+the same grid across `RISK_AI_DOMAINS` domains and runs 3.2× faster on 8
+domains with a bit-identical checksum — better scaling than the repricing
+loops (1.7×), which are allocation- rather than compute-bound.
 
 Small book for reference: historical 0.074 vs 0.255 s; MC 10k 0.448 vs
 2.708 s; BAW 1.06 vs 0.57 µs/eval.
