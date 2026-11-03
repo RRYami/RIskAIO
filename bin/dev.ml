@@ -5,9 +5,13 @@
 
     book --fixture DIR Position table, factor inventory, base values, NAV. price
     --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N]
-    One-position shock lab: base vs shocked value plus bump Greeks. bench-run
-    --fixture DIR [--mc N] run_engine stages with per-stage timing, Gc
-    allocation deltas and peak RSS (VmHWM).
+    One-position shock lab: base vs shocked value plus bump Greeks. option
+    --style european|american --right call|put --spot S --strike K --years T
+    --rate R --div Q --vol SIG [--price P] Direct single-option pricer: Black vs
+    BS-2002 plus bump Greeks; with --price P it inverts to implied vol instead
+    (European needs OTM, American handles ITM). bench-run --fixture DIR [--mc N]
+    run_engine stages with per-stage timing, Gc allocation deltas and peak RSS
+    (VmHWM).
 
     Memory numbers come from [Gc.stat]/[Gc.allocated_bytes] (words are 8 bytes
     on 64-bit) plus VmHWM from /proc/self/status. *)
@@ -272,8 +276,164 @@ let cmd_price rest =
       let vv = value ~vb:0.01 () -. value ~vb:(-0.01) () in
       Printf.printf "vega=%12.4f (per 1.00 vol)\n" (vv /. 0.02)
 
-(* --- bench-run: stage breakdown with Gc deltas --- *)
+(* --- option: direct single-option pricer --- *)
 
+let parse_style s =
+  match String.lowercase_ascii (String.trim s) with
+  | "european" | "e" -> `European
+  | "american" | "a" -> `American
+  | x ->
+      raise
+        (Invalid_argument ("bad --style: " ^ x ^ " (want european|american)"))
+
+let parse_right s =
+  match String.lowercase_ascii (String.trim s) with
+  | "call" | "c" -> true
+  | "put" | "p" -> false
+  | x -> raise (Invalid_argument ("bad --right: " ^ x ^ " (want call|put)"))
+
+let check_finite name x =
+  if not (Float.is_finite x) then
+    raise (Invalid_argument (name ^ " must be finite"))
+
+let scalar_price ~american ~call ~s ~k ~t ~r ~q ~sigma =
+  let b = r -. q in
+  if american then Options.bs2002_1 ~s ~k ~t ~r ~b ~sigma ~call
+  else Options.bs_1 ~s ~k ~t ~r ~b ~sigma ~call
+
+(** Discounted intrinsic floor (European lower bound, as in quotes). *)
+let dfloor ~call ~s ~k ~t ~r ~q =
+  let f = s *. exp ((r -. q) *. t) and d = exp (-.r *. t) in
+  if call then Float.max (d *. (f -. k)) 0. else Float.max (d *. (k -. f)) 0.
+
+let iv_of_price ~american ~call ~s ~k ~t ~r ~q ~price =
+  let right = if call then Quotes.Call else Quotes.Put in
+  let qot : Quotes.quote =
+    {
+      date = "dev";
+      underlying = "dev";
+      expiry = "dev";
+      right;
+      strike = k;
+      bid = price;
+      ask = price;
+      mid = price;
+      spot = s;
+      rate = r;
+      div = q;
+    }
+  in
+  if american then Quotes.iv_of_quote_amer qot ~t else Quotes.iv_of_quote qot ~t
+
+let cmd_option rest =
+  let style = ref "european"
+  and right = ref "call"
+  and s = ref Float.nan
+  and k = ref Float.nan
+  and t = ref Float.nan
+  and r = ref 0.
+  and q = ref 0.
+  and sg = ref Float.nan
+  and px = ref (-1.) in
+  Arg.parse_argv
+    (Array.of_list ("option" :: rest))
+    [
+      ("--style", Arg.Set_string style, "STYLE european|american (def european)");
+      ("--right", Arg.Set_string right, "RIGHT call|put (def call)");
+      ("--spot", Arg.Set_float s, "S spot (required)");
+      ("--strike", Arg.Set_float k, "K strike (required)");
+      ("--years", Arg.Set_float t, "T years to expiry (required)");
+      ("--rate", Arg.Set_float r, "R rate (def 0)");
+      ("--div", Arg.Set_float q, "Q dividend yield (def 0)");
+      ("--vol", Arg.Set_float sg, "SIGMA vol (required to price)");
+      ("--price", Arg.Set_float px, "P invert to implied vol instead");
+    ]
+    (fun _ -> ())
+    "dev option --style S --right R --spot S --strike K --years T [opts]";
+  if !s <> !s || !k <> !k || !t <> !t || ((not (!px > 0.)) && !sg <> !sg) then (
+    prerr_endline
+      "dev option --style european|american --right call|put --spot S --strike \
+       K --years T [--rate R] [--div Q] [--vol SIG | --price P]";
+    exit 2);
+  try
+    let american =
+      match parse_style !style with `European -> false | `American -> true
+    in
+    let call = parse_right !right in
+    List.iter
+      (fun (n, x) -> check_finite n x)
+      [ ("spot", !s); ("strike", !k); ("years", !t); ("rate", !r); ("div", !q) ];
+    if not (!s > 0.) then raise (Invalid_argument "spot must be > 0");
+    if not (!k > 0.) then raise (Invalid_argument "strike must be > 0");
+    if not (!t >= 0.) then raise (Invalid_argument "years must be >= 0");
+    let fwd = !s *. exp ((!r -. !q) *. !t) in
+    let otm = if call then !k > fwd else !k < fwd in
+    if !px > 0. then (
+      if not (!t > 0.) then
+        raise (Invalid_argument "years must be > 0 to invert");
+      let iv =
+        iv_of_price ~american ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q ~price:!px
+      in
+      let chk =
+        scalar_price ~american ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q ~sigma:iv
+      in
+      Printf.printf "style=%s right=%s S=%.4f K=%.4f T=%.4f r=%.4f q=%.4f\n"
+        !style !right !s !k !t !r !q;
+      Printf.printf "target=%.6f otm=%b\n" !px otm;
+      Printf.printf "iv=%.6f reprice=%.6f\n" iv chk)
+    else (
+      check_finite "vol" !sg;
+      if !t > 0. && not (!sg > 0.) then
+        raise (Invalid_argument "vol must be > 0 when years > 0");
+      (* at t = 0 both models return intrinsic without touching sigma *)
+      let sig_use = if !t > 0. then !sg else 0.2 in
+      let p =
+        scalar_price ~american ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q
+          ~sigma:sig_use
+      in
+      let fl = dfloor ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q in
+      Printf.printf
+        "style=%s right=%s S=%.4f K=%.4f T=%.4f r=%.4f q=%.4f sigma=%.4f\n"
+        !style !right !s !k !t !r !q !sg;
+      Printf.printf "forward=%.4f otm=%b floor=%.6f\n" fwd otm fl;
+      Printf.printf "price=%.6f time-value=%.6f\n" p (p -. fl);
+      if !t > 0. then (
+        let bump = 0.01 *. !s in
+        let up =
+          scalar_price ~american ~call ~s:(!s +. bump) ~k:!k ~t:!t ~r:!r ~q:!q
+            ~sigma:!sg
+        in
+        let dn =
+          scalar_price ~american ~call ~s:(!s -. bump) ~k:!k ~t:!t ~r:!r ~q:!q
+            ~sigma:!sg
+        in
+        let md =
+          scalar_price ~american ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q ~sigma:!sg
+        in
+        let vh = 0.01 in
+        let sg_lo = Float.max (!sg -. vh) 1e-6 in
+        let v_up =
+          scalar_price ~american ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q
+            ~sigma:(!sg +. vh)
+        in
+        let v_dn =
+          scalar_price ~american ~call ~s:!s ~k:!k ~t:!t ~r:!r ~q:!q
+            ~sigma:sg_lo
+        in
+        Printf.printf "delta=%.6f (ds=1%% central)\n"
+          ((up -. dn) /. (2. *. bump));
+        Printf.printf "gamma=%.6f\n" ((up -. (2. *. md) +. dn) /. (bump *. bump));
+        Printf.printf "vega=%.6f (per 1.00 vol)\n"
+          ((v_up -. v_dn) /. (!sg +. vh -. sg_lo))))
+  with
+  | Invalid_argument msg | Failure msg ->
+      prerr_endline ("dev option: " ^ msg);
+      exit 1
+  | Quotes.Quotes_error msg ->
+      prerr_endline ("dev option: cannot invert: " ^ msg);
+      exit 1
+
+(* --- bench-run: stage breakdown with Gc deltas --- *)
 let cmd_bench rest =
   let dir = ref "" and mc = ref 10_000 and base = ref "EUR" in
   Arg.parse_argv
@@ -343,16 +503,19 @@ let cmd_bench rest =
 
 let usage =
   "dev: engine playground (non-production diagnostics)\n\
-   usage: dev (book|price|bench-run) [opts]\n\
+   usage: dev (book|price|option|bench-run) [opts]\n\
   \  book --fixture DIR [--base CCY]\n\
   \  price --fixture DIR --id IID [--spot-bump F] [--vol-bump V] [--horizon N] \
    [--base CCY]\n\
+  \  option --style european|american --right call|put --spot S --strike K \
+   --years T [--rate R] [--div Q] [--vol SIG | --price P]\n\
   \  bench-run --fixture DIR [--mc N] [--base CCY]"
 
 let () =
   match Array.to_list Sys.argv with
   | _ :: "book" :: rest -> cmd_book rest
   | _ :: "price" :: rest -> cmd_price rest
+  | _ :: "option" :: rest -> cmd_option rest
   | _ :: "bench-run" :: rest -> cmd_bench rest
   | _ ->
       prerr_endline usage;

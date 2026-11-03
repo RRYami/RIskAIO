@@ -94,6 +94,10 @@ JSONB document per run; market inputs are snapshotted by the caller.
 dev.exe book --fixture fixtures/soxx-v1 --base USD        # positions, factors, NAV
 dev.exe price --fixture fixtures/soxx-v1 --base USD --id OPT1 --spot-bump -0.05
 dev.exe bench-run --fixture fixtures/soxx-v1 --base USD --mc 2000   # stage times + Gc deltas + peak RSS
+dev.exe option --style european --right call --spot 100 --strike 100 \
+  --years 1 --rate 0.05 --div 0.02 --vol 0.25            # price + bump Greeks
+dev.exe option --style american --right put --spot 100 --strike 110 \
+  --years 0.25 --rate 0.05 --div 0.01 --price 4.32      # invert to implied vol
 ```
 
 `bench-run` prints per-stage wall time plus minor/major allocation, live heap
