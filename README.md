@@ -29,10 +29,13 @@ scripts live outside the repo.
 | P7b | full taxonomy (closed 9-type variant + terms validation) | done |
 | P7c | Postgres read contract (`db/schema.sql`, `lib/db`, USD curves + dividends) | done |
 | P7d | API/worker/DB persistence (`lib/api`, `bin/api.exe`, `db/runs.sql`) | done |
+| P8 | Bond curves: unified `curve_id` (`SWAP/GOV/ISSUER/RATING`), `face=qty×par`, strict bond terms | done |
+| P9 | Bond analytics: `ytm/mac/mod_ytm/convexity/convexity_eff` (periodic + effective) | done |
 
-Oracle parity: the P3–P5 cross-language goldens (`oracle_*.json`) are consumed
-as data and the gated tests skip when they are absent. The scripts that
-generated them (RiskStartUp-venv based) no longer live here.
+Oracle parity: the P3–P5 cross-language goldens (`oracle_*.json`) are `universe-v1`
+(currency curves, `face=qty`). Current fixtures are `universe-v2`
+(`curve_id` curves, `face=qty×par`); oracle-gated tests run on v1 and skip on
+v2. The scripts that generated them (RiskStartUp-venv based) no longer live here.
 
 ## Quickstart (no sudo needed)
 
@@ -41,7 +44,7 @@ export PATH="$HOME/.local/bin:$PATH"   # opam lives here
 make switch   # one-time: opam switch create 5.3.0 (compiles OCaml, ~10 min)
 make deps     # dune, alcotest, yojson, ocamlformat, lacaml
 make build
-make test     # full suite: 79 tests across 4 binaries (no Python needed)
+make test     # full unit suite (no Python needed; oracle skips on v2 fixtures)
 make parity   # fixtures + full suite with fixture-gated tests + engine check
 make perf-big # scaled probe: ~2000 positions (see PERF.md)
 ```
@@ -106,6 +109,20 @@ and peak RSS, so repricing cost and allocation churn are visible per change.
 Option-pricing microbench (100k evals, `perf --amer 20 5000`; see PERF.md):
 European Black 1.37 µs/eval, American BS-2002 ~108 µs/eval single-domain
 (~34 µs/eval across 8 domains, checksum-identical).
+
+## Bonds: issuer curves + YTM family
+
+* Curves live in one table keyed by `curve_id`: `SWAP:<ccy>` (derivatives),
+  `GOV:<country>:<ccy>`, `ISSUER:<issuer>:<ccy>`, `RATING:<rating>:<ccy>`.
+  Gov → `GOV`, corp → `ISSUER` else `RATING:<bond_rating>:<ccy>`; missing grid
+  fails the build. `face = quantity × par_value` (`notional` accepted as alias).
+  Required bond terms: `maturity,coupon_rate,coupon_frequency,country,issuer,`
+  `issuer_rating,bond_rating,par_value,issue_date`.
+* Interpolation is linear on zeros inside the Q14 grid, flat outside
+  (`Market.interp_weights`); same weights on shocked curves.
+* Exposures add `ytm` (periodic `m=freq`, Brent `1e-12`), `mac_duration`,
+  `mod_duration_ytm`, `convexity` (periodic), `convexity_eff` (`±1bp` double
+  bump), alongside existing `dv01`/`mod_duration` (effective).
 
 ## Deliberate divergences from Python
 
