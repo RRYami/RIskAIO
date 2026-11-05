@@ -71,10 +71,12 @@ type future_spec = {
 type bond_spec = {
   pos : int;
   times : float array;
-  cashflows : float array;  (** per unit face *)
+  cashflows : float array;  (** per unit par *)
   spread : float;
-  face : float;
-  currency : string;
+  face : float;  (** qty × par_value *)
+  currency : string;  (** for FX conversion *)
+  curve : string;  (** curve_id: GOV:.. / ISSUER:.. / RATING:.. *)
+  freq : int;  (** coupon_frequency, for periodic YTM *)
 }
 
 type fx_forward_spec = {
@@ -112,13 +114,18 @@ let currencies b =
         (fun (f : fx_forward_spec) -> [ f.buy_ccy; f.sell_ccy ])
         b.fx_forwards)
 
-let curve_currencies b =
+(** Curve ids shocked as IR factors: derivatives on SWAP:<ccy>, bonds on
+    their resolved GOV/ISSUER/RATING curve, FX forwards on SWAP legs. *)
+let swap_curve_id ccy = "SWAP:" ^ ccy
+
+let curve_ids b =
   List.sort_uniq String.compare
-    (List.map (fun (o : option_spec) -> o.currency) b.options
-    @ List.map (fun (bd : bond_spec) -> bd.currency) b.bonds
-    @ List.map (fun (f : future_spec) -> f.currency) b.futures
+    (List.map (fun (o : option_spec) -> swap_curve_id o.currency) b.options
+    @ List.map (fun (bd : bond_spec) -> bd.curve) b.bonds
+    @ List.map (fun (f : future_spec) -> swap_curve_id f.currency) b.futures
     @ List.concat_map
-        (fun (f : fx_forward_spec) -> [ f.buy_ccy; f.sell_ccy ])
+        (fun (f : fx_forward_spec) ->
+          [ swap_curve_id f.buy_ccy; swap_curve_id f.sell_ccy ])
         b.fx_forwards)
 
 (* --- terms access --- *)
@@ -143,6 +150,55 @@ let term_int terms k =
   | Some (`Float f) -> int_of_float f
   | _ -> raise (Spec_error ("missing int term " ^ k))
 
+let term_float_alias terms keys =
+  let rec go = function
+    | [] -> raise (Spec_error ("missing numeric term " ^ List.hd keys))
+    | k :: rest -> (
+        match List.assoc_opt k terms with
+        | Some (`Float f) -> f
+        | Some (`Int i) -> float_of_int i
+        | Some (`String s) -> (
+            try float_of_string (String.trim s)
+            with Failure _ ->
+              if rest = [] then raise (Spec_error ("bad numeric term " ^ k))
+              else go rest)
+        | _ -> if rest = [] then raise (Spec_error ("missing numeric term " ^ k)) else go rest)
+  in
+  go keys
+
+(** Curve-id sanitiser: ':' is the IR-factor separator, so strip it from
+    free-text issuers/ratings. *)
+let sanitize s =
+  String.map (fun c -> if c = ':' then '-' else c) (String.trim s)
+
+let gov_curve_id ~country ~ccy =
+  Printf.sprintf "GOV:%s:%s" (sanitize country) (String.trim ccy)
+
+let issuer_curve_id ~issuer ~ccy =
+  Printf.sprintf "ISSUER:%s:%s" (sanitize issuer) (String.trim ccy)
+
+let rating_curve_id ~rating ~ccy =
+  Printf.sprintf "RATING:%s:%s" (sanitize rating) (String.trim ccy)
+
+(** Curve grid with legacy fallback: new ids are SWAP:<ccy>; old bundles key
+    curves by bare <ccy>. Bonds (GOV/ISSUER/RATING) have no fallback. *)
+let find_curve_grid state curve_id =
+  match List.assoc_opt curve_id state.Market.curves with
+  | Some g -> g
+  | None -> (
+      match String.split_on_char ':' curve_id with
+      | [ "SWAP"; ccy ] -> (
+          match List.assoc_opt ccy state.Market.curves with
+          | Some g -> g
+          | None -> raise (Spec_error ("no zero curve for " ^ curve_id)))
+      | _ -> raise (Spec_error ("no zero curve for " ^ curve_id)))
+
+let has_curve state curve_id =
+  try
+    ignore (find_curve_grid state curve_id);
+    true
+  with Spec_error _ -> false
+
 (* --- bonds --- *)
 
 let divmod_floor a b =
@@ -164,11 +220,23 @@ let add_months (d : Calendar.date) months =
   in
   try_day [ d.d; 30; 29; 28 ]
 
-(** Future cashflows per unit face: equal coupons + redemption. *)
+(** Future cashflows per unit par: equal coupons + redemption. *)
 let bond_cashflows terms as_of =
   let maturity = Calendar.of_string (term_string terms "maturity") in
   if Calendar.compare maturity as_of <= 0 then
     raise (Spec_error ("bond matured on " ^ Calendar.to_string maturity));
+  (match List.assoc_opt "issue_date" terms with
+  | None -> ()
+  | Some (`String s) -> (
+      let issue =
+        try Calendar.of_string (String.trim s)
+        with _ -> raise (Spec_error ("bad term issue_date: " ^ s))
+      in
+      if Calendar.compare issue maturity >= 0 then
+        raise (Spec_error "issue_date must be before maturity");
+      if Calendar.compare issue as_of > 0 then
+        raise (Spec_error "issue_date is after as_of"))
+  | _ -> raise (Spec_error "bad term issue_date"));
   let freq = term_int terms "coupon_frequency" in
   if not (List.mem freq [ 1; 2; 4; 12 ]) then
     raise (Spec_error (Printf.sprintf "unsupported coupon_frequency %d" freq));
@@ -279,20 +347,57 @@ let add_spec (book : book) pos (inst : Refdata.instrument_record)
       }
     in
     { book with options = book.options @ [ spec ] })
-  else if List.mem inst.inst_type bond_types then
-    let spread = state_find "credit spread" state.spreads key in
+  else if List.mem inst.inst_type bond_types then (
+    let country = term_string t "country" in
+    let issuer = term_string t "issuer" in
+    let bond_rating = term_string t "bond_rating" in
+    let par = term_float_alias t [ "par_value"; "notional" ] in
+    if not (par > 0.) then raise (Spec_error "par_value must be > 0");
+    let curve =
+      match inst.inst_type with
+      | Refdata.Gov_bond ->
+          let cid = gov_curve_id ~country ~ccy:inst.currency in
+          (match List.assoc_opt cid state.Market.curves with
+          | Some _ -> cid
+          | None ->
+              raise
+                (Spec_error
+                   (Printf.sprintf "no gov curve %s for %s" cid key)))
+      | Refdata.Corp_bond ->
+          let iid = issuer_curve_id ~issuer ~ccy:inst.currency in
+          if List.assoc_opt iid state.Market.curves <> None then iid
+          else
+            let rid = rating_curve_id ~rating:bond_rating ~ccy:inst.currency in
+            (match List.assoc_opt rid state.Market.curves with
+            | Some _ -> rid
+            | None ->
+                raise
+                  (Spec_error
+                     (Printf.sprintf
+                        "no issuer curve %s nor rating curve %s for %s" iid rid
+                        key)))
+      | _ -> assert false
+    in
+    (* Residual basis over the issuer/rating/gov curve; 0 when the curve
+       already carries the credit component. Optional for migration. *)
+    let spread =
+      match List.assoc_opt key state.spreads with Some s -> s | None -> 0.
+    in
     let times, cfs = bond_cashflows t state.as_of in
+    let freq = term_int t "coupon_frequency" in
     let spec =
       {
         pos;
         times;
         cashflows = cfs;
         spread;
-        face = qty;
+        face = qty *. par;
         currency = inst.currency;
+        curve;
+        freq;
       }
     in
-    { book with bonds = book.bonds @ [ spec ] }
+    { book with bonds = book.bonds @ [ spec ] })
   else if inst.inst_type = Refdata.Cash then
     { book with cash = book.cash @ [ pos ] }
   else if inst.inst_type = Refdata.Fx_forward then (
@@ -417,10 +522,10 @@ let build_book (holdings : Holdings.holding_row list)
         problems := !problems @ [ "no FX rate for " ^ ccy ])
     (currencies !book);
   List.iter
-    (fun ccy ->
-      if List.assoc_opt ccy state.curves = None then
-        problems := !problems @ [ "no zero curve for " ^ ccy ])
-    (curve_currencies !book);
+    (fun cid ->
+      if not (has_curve state cid) then
+        problems := !problems @ [ "no zero curve for " ^ cid ])
+    (curve_ids !book);
   if !problems <> [] then raise (Book_error !problems);
   !book
 
@@ -492,8 +597,12 @@ let make_pricer book state factors =
   let fut_f0 =
     List.map
       (fun (f : future_spec) ->
-        let cols = Market.ir factors f.currency in
-        let grid = List.assoc f.currency state.Market.curves in
+        let cid = swap_curve_id f.currency in
+        let cols =
+          try Market.ir factors cid
+          with Market.Market_data_error _ -> Market.ir factors f.currency
+        in
+        let grid = find_curve_grid state cid in
         let curve_row =
           Array.init (Array.length grid) (fun t ->
               grid.(t) +. zero.(0).(cols.(t)))
@@ -504,17 +613,24 @@ let make_pricer book state factors =
   in
   { pricer with fut_f0 = Array.of_list fut_f0 }
 
-(** Shocked zero curves over a row range: (hi-lo, 12) per currency. *)
+(** Shocked zero curves over a row range: (hi-lo, 12) per curve_id. *)
 let shocked_curves pricer shocks ~lo ~n ~scale =
+  let cols_of cid =
+    try Market.ir pricer.factors cid
+    with Market.Market_data_error _ -> (
+      match String.split_on_char ':' cid with
+      | [ "SWAP"; ccy ] -> Market.ir pricer.factors ccy
+      | _ -> raise (Market.Market_data_error ("unknown factor IR:" ^ cid)))
+  in
   List.map
-    (fun ccy ->
-      let grid = List.assoc ccy pricer.state.Market.curves in
-      let cols = Market.ir pricer.factors ccy in
+    (fun cid ->
+      let grid = find_curve_grid pricer.state cid in
+      let cols = cols_of cid in
       let m =
         Array.init n (fun r -> shocked_curve grid cols shocks.(lo + r) scale)
       in
-      (ccy, m))
-    (curve_currencies pricer.book)
+      (cid, m))
+    (curve_ids pricer.book)
 
 let fx_levels pricer shocks ~lo ~n ~scale =
   List.map
@@ -613,7 +729,7 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
         pricer.lin_pos
     done;
   let curves = shocked_curves pricer shocks ~lo ~n ~scale in
-  let curve_of ccy = List.assoc ccy curves in
+  let curve_of cid = List.assoc cid curves in
   List.iter2
     (fun (f : future_spec) f0 ->
       let eq_j = Market.eq pricer.factors f.underlying in
@@ -623,7 +739,7 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
         /. trading_days
       in
       let w = (Market.interp_weights [| Float.max t 1e-9 |]).(0) in
-      let crow = curve_of f.currency in
+      let crow = curve_of (swap_curve_id f.currency) in
       for r = 0 to n - 1 do
         let s = s0 *. exp (shocks.(lo + r).(eq_j) *. scale) in
         let rr = ref 0. in
@@ -644,7 +760,7 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
         /. trading_days
       in
       let w = (Market.interp_weights [| Float.max t 1e-9 |]).(0) in
-      let crow = curve_of o.currency in
+      let crow = curve_of (swap_curve_id o.currency) in
       let s =
         Array.init n (fun r -> s0 *. exp (shocks.(lo + r).(eq_j) *. scale))
       in
@@ -679,7 +795,7 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
   let dt, rolled = roll pricer horizon_days in
   List.iter2
     (fun (b : bond_spec) (times, w, received) ->
-      let crow = curve_of b.currency in
+      let crow = curve_of b.curve in
       let n_cf = Array.length times in
       let remaining =
         Array.sub b.cashflows (Array.length b.cashflows - n_cf) n_cf
@@ -714,8 +830,8 @@ let values_into pricer shocks ~lo ~hi ?(horizon_days = 0) ?(vol_shift = [])
     (fun (fwd : fx_forward_spec) ->
       let t = Float.max (fwd.t -. dt) 0. in
       let w = (Market.interp_weights [| Float.max t 1e-9 |]).(0) in
-      let buy_curve = curve_of fwd.buy_ccy
-      and sell_curve = curve_of fwd.sell_ccy in
+      let buy_curve = curve_of (swap_curve_id fwd.buy_ccy)
+      and sell_curve = curve_of (swap_curve_id fwd.sell_ccy) in
       let buy_fx = fx_of fwd.buy_ccy and sell_fx = fx_of fwd.sell_ccy in
       for r = 0 to n - 1 do
         let rb = ref 0. and rs = ref 0. in
@@ -751,11 +867,70 @@ let base_values pricer =
   let k = Market.size pricer.factors in
   (values pricer [| Array.make k 0. |] ()).(0)
 
+(** Bond analytics (YTM family), periodic with coupon frequency m.
+    Price per unit par at yield y: Σ CF/(1+y/m)^(m·t), t=Actual/365.
+    YTM solves periodic price = engine local PV (continuous curve+spread).
+    Mac/Mod/Convexity are YTM-weighted; effective convexity is bump-based. *)
+
+let bond_price_at_y times cfs m y =
+  let base = 1. +. y /. float_of_int m in
+  if base <= 0. then Float.infinity
+  else
+    let s = ref 0. in
+    for i = 0 to Array.length times - 1 do
+      s :=
+        !s +. cfs.(i) /. (base ** (float_of_int m *. times.(i)))
+    done;
+    !s
+
+let bond_ytm times cfs m target =
+  if not (Float.is_finite target && target > 0.) then Float.nan
+  else if Array.length times = 0 then Float.nan
+  else
+    let f y = bond_price_at_y times cfs m y -. target in
+    let lo = -.float_of_int m +. 1e-6 and hi = ref 10. in
+    let flo = f lo in
+    if not (flo > 0.) then Float.nan
+    else (
+      while f !hi > 0. && !hi < 1e6 do
+        hi := !hi *. 2.
+      done;
+      if f !hi > 0. then Float.nan
+      else
+        try Quotes.brent f lo !hi ~tol:1e-12 ~maxiter:100
+        with Invalid_argument _ -> Float.nan)
+
+let bond_mac_mod_conv times cfs m y =
+  if not (Float.is_finite y) then (Float.nan, Float.nan, Float.nan)
+  else
+    let base = 1. +. y /. float_of_int m in
+    if base <= 0. then (Float.nan, Float.nan, Float.nan)
+    else
+      let price = bond_price_at_y times cfs m y in
+      if not (price > 0.) then (Float.nan, Float.nan, Float.nan)
+      else
+        let mac = ref 0. and conv = ref 0. in
+        for i = 0 to Array.length times - 1 do
+          let t = times.(i) in
+          let df = cfs.(i) /. (base ** (float_of_int m *. t)) /. price in
+          mac := !mac +. t *. df;
+          conv := !conv +. t *. (t +. 1. /. float_of_int m) *. df
+        done;
+        let macv = !mac in
+        let modv = macv /. base in
+        let convv = !conv /. (base *. base) in
+        (macv, modv, convv)
+
 type exposures = {
   market_value : float array;
   exposure : float array;
   delta_equivalent : float array;
   dv01 : float array;
+  ytm : float array;
+  mac : float array;
+  mod_ytm : float array;
+  convexity : float array;
+  convexity_eff : float array;
   fx_exposure : (string * float) list;
 }
 
@@ -793,21 +968,53 @@ let exposures pricer =
     pricer.book.futures
     (Array.to_list pricer.fut_f0);
   let dv01 = Array.make pricer.n_pos 0. in
+  let ytm = Array.make pricer.n_pos Float.nan in
+  let mac = Array.make pricer.n_pos Float.nan in
+  let mod_ytm = Array.make pricer.n_pos Float.nan in
+  let convexity = Array.make pricer.n_pos Float.nan in
+  let convexity_eff = Array.make pricer.n_pos Float.nan in
+  let dy = 0.0001 in
   List.iter
-    (fun ccy ->
-      let bump = Array.make_matrix 1 k 0. in
-      Array.iter
-        (fun j -> bump.(0).(j) <- 0.0001)
-        (Market.ir pricer.factors ccy);
-      let diff =
-        let b1 = (values pricer bump ()).(0) in
-        Array.init pricer.n_pos (fun p -> v0.(p) -. b1.(p))
+    (fun cid ->
+      let cols =
+        try Market.ir pricer.factors cid
+        with Market.Market_data_error _ -> (
+          match String.split_on_char ':' cid with
+          | [ "SWAP"; ccy ] -> Market.ir pricer.factors ccy
+          | _ -> raise (Market.Market_data_error ("unknown factor IR:" ^ cid)))
       in
+      let bump_up = Array.make_matrix 1 k 0. in
+      let bump_dn = Array.make_matrix 1 k 0. in
+      Array.iter
+        (fun j ->
+          bump_up.(0).(j) <- dy;
+          bump_dn.(0).(j) <- -.dy)
+        cols;
+      let b_up = (values pricer bump_up ()).(0) in
+      let b_dn = (values pricer bump_dn ()).(0) in
       List.iter
         (fun (b : bond_spec) ->
-          if b.currency = ccy then dv01.(b.pos) <- diff.(b.pos))
+          if b.curve = cid then (
+            dv01.(b.pos) <- v0.(b.pos) -. b_up.(b.pos);
+            let p0 = v0.(b.pos) in
+            if Float.is_finite p0 && p0 <> 0. then
+              convexity_eff.(b.pos) <-
+                (b_up.(b.pos) +. b_dn.(b.pos) -. 2. *. p0)
+                /. (p0 *. dy *. dy)))
         pricer.book.bonds)
-    (curve_currencies pricer.book);
+    (curve_ids pricer.book);
+  List.iter
+    (fun (b : bond_spec) ->
+      let fx_ccy = fx0 b.currency in
+      if b.face <> 0. && fx_ccy <> 0. then (
+        let target = v0.(b.pos) *. base /. (b.face *. fx_ccy) in
+        let y = bond_ytm b.times b.cashflows b.freq target in
+        ytm.(b.pos) <- y;
+        let macv, modv, convv = bond_mac_mod_conv b.times b.cashflows b.freq y in
+        mac.(b.pos) <- macv;
+        mod_ytm.(b.pos) <- modv;
+        convexity.(b.pos) <- convv))
+    pricer.book.bonds;
   let fx_tot = Hashtbl.create 8 in
   let add ccy v =
     Hashtbl.replace fx_tot ccy
@@ -824,7 +1031,7 @@ let exposures pricer =
       let w = (Market.interp_weights [| fwd.t |]).(0) in
       List.iter
         (fun (ccy, notional, sign) ->
-          let grid = List.assoc ccy pricer.state.Market.curves in
+          let grid = find_curve_grid pricer.state (swap_curve_id ccy) in
           let df = exp (-.(rowdot [| grid |] w).(0) *. fwd.t) in
           add ccy
             (sign *. fwd.contracts *. notional *. df
@@ -840,6 +1047,11 @@ let exposures pricer =
     exposure;
     delta_equivalent = delta_eq;
     dv01;
+    ytm;
+    mac;
+    mod_ytm;
+    convexity;
+    convexity_eff;
     fx_exposure =
       Hashtbl.fold (fun c v acc -> (c, v) :: acc) fx_tot []
       |> List.sort (fun (a, _) (b, _) -> String.compare a b);

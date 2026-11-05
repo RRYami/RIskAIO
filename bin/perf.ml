@@ -152,7 +152,7 @@ let () =
     time "build_factors" (fun () ->
         Market.build_factors bundle ~equity_ids:(Pricing.equity_ids book)
           ~fx_ccys:(Pricing.currencies book)
-          ~curve_ccys:(Pricing.curve_currencies book)
+          ~curve_ccys:(Pricing.curve_ids book)
           ~history_days:(Some config.history_days))
   in
   Printf.printf "%-28s %8d positions, %d factors, %d returns\n%!" "book"

@@ -46,7 +46,7 @@ let parity dir =
     Risk_engine.Market.build_factors bundle
       ~equity_ids:(Risk_engine.Pricing.equity_ids book)
       ~fx_ccys:(Risk_engine.Pricing.currencies book)
-      ~curve_ccys:(Risk_engine.Pricing.curve_currencies book)
+      ~curve_ccys:(Risk_engine.Pricing.curve_ids book)
       ~history_days:(Some config.history_days)
   in
   let pricer = Risk_engine.Pricing.make_pricer book state factors in

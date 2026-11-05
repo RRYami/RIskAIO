@@ -126,7 +126,7 @@ let cmd_book rest =
     Pricing.make_pricer book state
       (Market.build_factors bundle ~equity_ids:(Pricing.equity_ids book)
          ~fx_ccys:(Pricing.currencies book)
-         ~curve_ccys:(Pricing.curve_currencies book)
+         ~curve_ccys:(Pricing.curve_ids book)
          ~history_days:None)
   in
   let v0 = Pricing.base_values pricer in
@@ -146,7 +146,7 @@ let cmd_book rest =
     (String.concat "," (Pricing.equity_ids book));
   Printf.printf "fx: %s | curves: %s\n"
     (String.concat "," (Pricing.currencies book))
-    (String.concat "," (Pricing.curve_currencies book));
+    (String.concat "," (Pricing.curve_ids book));
   Printf.printf "factors: %d (%s)\n"
     (Market.size pricer.Pricing.factors)
     (String.concat "," (Array.to_list pricer.Pricing.factors.names));
@@ -195,7 +195,7 @@ let cmd_price rest =
   let factors =
     Market.build_factors bundle ~equity_ids:(Pricing.equity_ids book)
       ~fx_ccys:(Pricing.currencies book)
-      ~curve_ccys:(Pricing.curve_currencies book)
+      ~curve_ccys:(Pricing.curve_ids book)
       ~history_days:None
   in
   let pricer = Pricing.make_pricer book state factors in
@@ -462,7 +462,7 @@ let cmd_bench rest =
     timed "build_factors" (fun () ->
         Market.build_factors bundle ~equity_ids:(Pricing.equity_ids book)
           ~fx_ccys:(Pricing.currencies book)
-          ~curve_ccys:(Pricing.curve_currencies book)
+          ~curve_ccys:(Pricing.curve_ids book)
           ~history_days:(Some config.history_days))
   in
   let inputs : Run.engine_inputs =

@@ -35,6 +35,20 @@ let load_dir base =
       let p = Filename.concat dir base in
       if Sys.file_exists p then Some (dir, p) else None
 
+let is_v2_fixtures dir =
+  try
+    let m = Yojson.Basic.from_file (Filename.concat dir "manifest.json") in
+    let open Yojson.Basic.Util in
+    match m |> member "terms_schema" with
+    | `String s -> s <> "universe-v1"
+    | _ -> false
+  with _ -> false
+
+let skip_if_v2 dir what =
+  if is_v2_fixtures dir then (
+    print_endline ("skip " ^ what ^ ": universe-v2 fixtures need regenerated oracle");
+    Alcotest.skip ())
+
 let build_inputs dir =
   let instruments =
     Refdata.instruments_of_file (Filename.concat dir "instruments.json")
@@ -132,6 +146,7 @@ let test_run_oracle () =
   match load_dir "oracle_p4.json" with
   | None -> Alcotest.skip ()
   | Some (dir, oracle_path) ->
+      skip_if_v2 dir "oracle_p4";
       let inputs, config = build_inputs dir in
       let res = Run.run_engine inputs config () in
       let open Yojson.Basic.Util in
@@ -220,6 +235,7 @@ let test_mc_diagnostics () =
   match load_dir "oracle_p4.json" with
   | None -> Alcotest.skip ()
   | Some (dir, oracle_path) ->
+      skip_if_v2 dir "oracle_p4:mc";
       let inputs, config = build_inputs dir in
       let res = Run.run_engine inputs (mc_small_config config) () in
       let open Yojson.Basic.Util in

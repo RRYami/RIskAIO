@@ -30,6 +30,12 @@ RiskStartUp checkout.
 ## Provisional
 
 Instrument `terms` follow the `marketdata/universe.py` reference-v1 schema
-(`terms_schema: universe-v1` in the manifest): `coupon_rate`/`coupon_frequency`/
-`maturity` bonds, `call_put`/`style`/`strike`/`underlying_instrument_id` options,
+(`terms_schema: universe-v2` in the manifest): `coupon_rate`/`coupon_frequency`/
+`maturity`/`country`/`issuer`/`issuer_rating`/`bond_rating`/`par_value`(+`notional`
+alias)/`issue_date` bonds, `call_put`/`style`/`strike`/`underlying_instrument_id` options,
 `buy_currency`/`sell_currency`/`*_notional`/`settlement_date` FX forwards.
+
+Curves are a unified table keyed by `curve_id` (`SWAP:<ccy>`, `GOV:<country>:<ccy>`,
+`ISSUER:<issuer>:<ccy>`, `RATING:<rating>:<ccy>`). Gov bonds price on
+`GOV:<country>:<ccy>`; corp bonds on `ISSUER:<issuer>:<ccy>` if present else
+`RATING:<bond_rating>:<ccy>`. Face is `quantity × par_value` (bond count).

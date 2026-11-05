@@ -6,7 +6,9 @@
     Column contract (mirrors [fixtures/mini-v1/marketdata.json]):
     - prices: instrument_id, date, close (decimal text), currency
     - fx: date, currency, rate_to_eur (decimal text)
-    - curves: date, currency, tenor, tenor_years, zero_rate (float64)
+    - curves: date, curve_id, tenor, tenor_years, zero_rate (float64)
+      (legacy bundles used [currency] as the curve key; the JSON bridge
+      accepts both, mapping [currency] → [curve_id])
     - vols: instrument_id, atm_vol_30d (float64)
     - spreads: instrument_id, spread (float64)
     - dividends: instrument_id, dividend_yield (float64, as-of snapshot)
@@ -28,7 +30,7 @@ type fx_tuple = { date : string; currency : string; rate_to_eur : string }
 
 type curve_tuple = {
   date : string;
-  currency : string;
+  curve_id : string;
   tenor : string;
   tenor_years : float;
   zero_rate : float;
@@ -42,7 +44,7 @@ type dividend_tuple = { instrument_id : string; dividend_yield : float }
 let views =
   [ "v_prices"; "v_fx"; "v_curves"; "v_vols"; "v_spreads"; "v_dividends" ]
 
-(** Every date×currency in the history must carry the full Q14 tenor grid, in
+(** Every date×curve in the history must carry the full Q14 tenor grid, in
     order; otherwise factor building would silently misalign. Raises
     [Invalid_argument] naming the first offending group. *)
 let check_curve_grid (curves : Marketdata.curve_row list) =
@@ -50,19 +52,19 @@ let check_curve_grid (curves : Marketdata.curve_row list) =
   let groups = Hashtbl.create 16 in
   List.iter
     (fun (r : Marketdata.curve_row) ->
-      let k = (Calendar.to_string r.date, r.currency) in
+      let k = (Calendar.to_string r.date, r.curve_id) in
       Hashtbl.replace groups k
         ((r.tenor, r.tenor_years)
         :: (Hashtbl.find_opt groups k |> Option.value ~default:[])))
     curves;
   Hashtbl.iter
-    (fun (ds, ccy) tenors ->
+    (fun (ds, cid) tenors ->
       let names = List.map fst (List.sort compare tenors) in
       let want = List.sort compare expected in
       if names <> want then
         invalid_arg
           (Printf.sprintf
-             "db: curve grid for %s on %s is [%s], expected Q14 [%s]" ccy ds
+             "db: curve grid for %s on %s is [%s], expected Q14 [%s]" cid ds
              (String.concat "," names) (String.concat "," want)))
     groups
 
@@ -91,7 +93,7 @@ let bundle_of_tuples ~prices ~fx ~curves ~vols ~spreads ~dividends =
       (fun (c : curve_tuple) ->
         {
           Marketdata.date = Calendar.of_string c.date;
-          currency = c.currency;
+          curve_id = c.curve_id;
           tenor = c.tenor;
           tenor_years = c.tenor_years;
           zero_rate = c.zero_rate;

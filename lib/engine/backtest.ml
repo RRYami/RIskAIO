@@ -282,7 +282,7 @@ let run_backtest (inputs : Run.engine_inputs) (config : Config.run_config)
   let full =
     Market.build_factors inputs.bundle ~equity_ids:(Pricing.equity_ids book0)
       ~fx_ccys:(Pricing.currencies book0)
-      ~curve_ccys:(Pricing.curve_currencies book0)
+      ~curve_ccys:(Pricing.curve_ids book0)
       ~history_days:None
   in
   let dates = full.return_dates in

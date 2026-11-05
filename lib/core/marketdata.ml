@@ -37,7 +37,7 @@ type fx_row = { date : Calendar.date; currency : string; rate_to_eur : Money.t }
 
 type curve_row = {
   date : Calendar.date;
-  currency : string;
+  curve_id : string;  (** e.g. SWAP:EUR, GOV:DE:EUR, ISSUER:<issuer>:<ccy>, RATING:<rating>:<ccy> *)
   tenor : string;
   tenor_years : float;
   zero_rate : float;
@@ -88,9 +88,19 @@ let fx_row_of_yojson j =
   }
 
 let curve_row_of_yojson j =
+  (* New schema uses [curve_id]; legacy fixtures used [currency] as the key.
+     Accept both so old bundles still load (curve_id = currency fallback). *)
+  let curve_id =
+    match j |> member "curve_id" with
+    | `Null -> (
+        match j |> member "currency" with
+        | `Null -> raise (Yojson.Basic.Util.Type_error ("missing curve_id", j))
+        | c -> to_string c)
+    | c -> to_string c
+  in
   {
     date = j |> member "date" |> date_of_json;
-    currency = j |> member "currency" |> to_string;
+    curve_id;
     tenor = j |> member "tenor" |> to_string;
     tenor_years = j |> member "tenor_years" |> to_number;
     zero_rate = j |> member "zero_rate" |> to_number;

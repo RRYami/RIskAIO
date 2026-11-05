@@ -25,15 +25,20 @@ CREATE TABLE IF NOT EXISTS market_fx (
   PRIMARY KEY (date, currency)
 );
 
--- One row per (date, currency, tenor). The engine expects the full Q14
--- grid per date×currency; Risk_db.check_curve_grid enforces it.
+-- One row per (date, curve_id, tenor). The engine expects the full Q14
+-- grid per date×curve_id; Risk_db.check_curve_grid enforces it.
+-- Curve ids (single table, same logic for gov/corp):
+--   SWAP:<CCY>                 risk-free / derivatives discounting
+--   GOV:<COUNTRY>:<CCY>        sovereign, e.g. GOV:DE:EUR, GOV:US:USD
+--   ISSUER:<issuer>:<CCY>      single-name, ':' sanitised to '-'
+--   RATING:<rating>:<CCY>      e.g. RATING:BBB:USD
 CREATE TABLE IF NOT EXISTS market_curves (
   date        DATE NOT NULL,
-  currency    TEXT NOT NULL,
+  curve_id    TEXT NOT NULL,
   tenor       TEXT NOT NULL,
   tenor_years DOUBLE PRECISION NOT NULL,
   zero_rate   DOUBLE PRECISION NOT NULL,
-  PRIMARY KEY (date, currency, tenor)
+  PRIMARY KEY (date, curve_id, tenor)
 );
 
 CREATE TABLE IF NOT EXISTS market_vols (
@@ -67,7 +72,7 @@ CREATE OR REPLACE VIEW v_fx AS
   FROM market_fx;
 
 CREATE OR REPLACE VIEW v_curves AS
-  SELECT date::text AS date, currency, tenor, tenor_years, zero_rate
+  SELECT date::text AS date, curve_id, tenor, tenor_years, zero_rate
   FROM market_curves;
 
 CREATE OR REPLACE VIEW v_vols AS

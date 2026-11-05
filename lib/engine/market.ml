@@ -3,7 +3,9 @@
     Factors (1-day shocks, oldest first):
     - [EQ:<instrument_id>] — log return of the close;
     - [FX:<ccy>] — log return of EUR per unit (EUR is the numeraire, no factor);
-    - [IR:<ccy>:<tenor>] — absolute change of the zero rate on the Q14 grid.
+    - [IR:<curve_id>:<tenor>] — absolute change of the zero rate on the Q14
+      grid, where [curve_id] is e.g. [SWAP:EUR], [GOV:DE:EUR],
+      [ISSUER:<issuer>:<ccy>] or [RATING:<rating>:<ccy>].
 
     Only the factors a portfolio needs are built. Zero curves interpolate
     linearly on the grid and extrapolate flat (Q14).
@@ -45,7 +47,7 @@ type market_state = {
   as_of : Calendar.date;
   prices : (string * float) list;
   fx : (string * float) list;  (** EUR per unit; EUR = 1 *)
-  curves : (string * float array) list;  (** zero rates on the grid *)
+  curves : (string * float array) list;  (** curve_id -> zero rates on grid *)
   vols : (string * float) list;
   spreads : (string * float) list;
   dividends : (string * float) list;
@@ -74,7 +76,7 @@ let market_state (b : Marketdata.bundle) as_of =
       (fun (r : Marketdata.curve_row) -> Calendar.equal r.date as_of)
       b.curves
     |> List.sort (fun (a : Marketdata.curve_row) (b : Marketdata.curve_row) ->
-        let c = String.compare a.currency b.currency in
+        let c = String.compare a.curve_id b.curve_id in
         if c <> 0 then c else Float.compare a.tenor_years b.tenor_years)
   in
   if prices = [] || fx = [] || crows = [] then
@@ -90,11 +92,11 @@ let market_state (b : Marketdata.bundle) as_of =
           | Some c -> [ (c, Array.of_list (List.rev acc)) ])
       | (r : Marketdata.curve_row) :: rest -> (
           match cur with
-          | None -> group [ r.zero_rate ] (Some r.currency) rest
-          | Some c when c = r.currency -> group (r.zero_rate :: acc) cur rest
+          | None -> group [ r.zero_rate ] (Some r.curve_id) rest
+          | Some c when c = r.curve_id -> group (r.zero_rate :: acc) cur rest
           | Some c ->
               (c, Array.of_list (List.rev acc))
-              :: group [ r.zero_rate ] (Some r.currency) rest)
+              :: group [ r.zero_rate ] (Some r.curve_id) rest)
     in
     group [] None crows
   in
@@ -143,10 +145,22 @@ let fx fs ccy =
   if ccy = Marketdata.base_currency then None
   else Some (factor_index fs ("FX:" ^ ccy))
 
-let ir fs ccy =
+let ir fs curve_id =
   Array.init n_tenors (fun k ->
       factor_index fs
-        (Printf.sprintf "IR:%s:%s" ccy (fst (List.nth Marketdata.tenors k))))
+        (Printf.sprintf "IR:%s:%s" curve_id (fst (List.nth Marketdata.tenors k))))
+
+(** Split [IR:<curve_id>:<tenor>] into [(curve_id, tenor)]. [curve_id] may
+    itself contain ':' (e.g. GOV:DE:EUR), so split off the last component. *)
+let split_ir name =
+  if String.length name <= 3 || String.sub name 0 3 <> "IR:" then
+    invalid_arg ("not an IR factor: " ^ name);
+  let rest = String.sub name 3 (String.length name - 3) in
+  match String.rindex_opt rest ':' with
+  | None -> invalid_arg ("bad IR factor: " ^ name)
+  | Some i ->
+      ( String.sub rest 0 i,
+        String.sub rest (i + 1) (String.length rest - i - 1) )
 
 (** Pivot dated rows to a dense matrix over [keys]. Returns end-dates + returns.
     Single pass over [rows] (per-key filtering would be keys × rows). *)
@@ -214,7 +228,8 @@ let wide table_name rows get_key get_val get_date keys ~log_returns =
   in
   (List.tl dates, rets)
 
-(** Factor history: the last [history_days] daily returns ([None] = all). *)
+(** Factor history: the last [history_days] daily returns ([None] = all).
+    [curve_ids] are curve_id keys (SWAP:.., GOV:.., ISSUER:.., RATING:..). *)
 let build_factors (bundle : Marketdata.bundle) ~equity_ids ~fx_ccys ~curve_ccys
     ~history_days =
   let eq = List.sort_uniq String.compare equity_ids in
@@ -258,10 +273,15 @@ let build_factors (bundle : Marketdata.bundle) ~equity_ids ~fx_ccys ~curve_ccys
      in
      add d m (List.map (fun c -> "FX:" ^ c) fx));
   List.iter
-    (fun ccy ->
+    (fun cid ->
       let rows =
         List.filter
-          (fun (r : Marketdata.curve_row) -> r.currency = ccy)
+          (fun (r : Marketdata.curve_row) ->
+            r.curve_id = cid
+            ||
+            match String.split_on_char ':' cid with
+            | [ "SWAP"; ccy ] -> r.curve_id = ccy (* legacy currency-keyed bundles *)
+            | _ -> false)
           bundle.curves
       in
       let tenors = List.map fst Marketdata.tenors in
@@ -272,7 +292,7 @@ let build_factors (bundle : Marketdata.bundle) ~equity_ids ~fx_ccys ~curve_ccys
           (fun r -> r.Marketdata.date)
           tenors ~log_returns:false
       in
-      add d m (List.map (fun t -> "IR:" ^ ccy ^ ":" ^ t) tenors))
+      add d m (List.map (fun t -> "IR:" ^ cid ^ ":" ^ t) tenors))
     ir_ccys;
   match !dates with
   | None ->

@@ -159,10 +159,15 @@ def build(args: argparse.Namespace) -> dict[str, object]:
     add("GOV-EUR-1", "GOV_BOND", "EUR", {
         "coupon_rate": 0.025, "coupon_frequency": 1, "maturity": "2035-06-15",
         "day_count": "ACT/ACT", "issue_date": "2020-06-15",
+        "country": "DE", "issuer": "DE sovereign",
+        "issuer_rating": "AAA", "bond_rating": "AAA",
+        "par_value": 100.0,
     }, ("ISIN", isin("EUR")))
     add("CORP-USD-1", "CORP_BOND", "USD", {
         "coupon_rate": 0.045, "coupon_frequency": 2, "maturity": "2030-03-01",
         "day_count": "30/360", "seniority": "senior", "issuer": "US energy co 0",
+        "country": "US", "issuer_rating": "BBB", "bond_rating": "BBB",
+        "par_value": 100.0, "issue_date": "2020-03-01",
     }, ("ISIN", isin("USD")))
     add("CASH-EUR", "CASH", "EUR", {}, ("BBG_TICKER", "EUR CASH"))
     add("FUND-USD-1", "FUND", "USD", {"issuer": "US asset manager 0"},
@@ -221,18 +226,32 @@ def build(args: argparse.Namespace) -> dict[str, object]:
     for ccy in CCYS:
         for d, r in zip(bizdays, fx_paths[ccy]):
             fx.append({"date": d.isoformat(), "currency": ccy, "rate_to_eur": f"{r:.10f}"})
-    for ccy in CCYS:
+    # Unified curve table: SWAP (risk-free) + GOV + ISSUER + RATING.
+    # curve_id encodes issuer/rating/country + currency suffix for
+    # Currency-scoped rate shocks (suffix after last ':').
+    CURVE_DEFS = [
+        ("SWAP:EUR", "EUR", 0.0),
+        ("SWAP:USD", "USD", 0.0),
+        ("SWAP:GBP", "GBP", 0.0),
+        ("GOV:DE:EUR", "EUR", 0.0002),
+        ("GOV:US:USD", "USD", 0.0003),
+        ("GOV:GB:GBP", "GBP", 0.0002),
+        ("ISSUER:US energy co 0:USD", "USD", 0.015),
+        ("RATING:BBB:USD", "USD", 0.012),
+        ("RATING:AAA:EUR", "EUR", 0.0002),
+    ]
+    for curve_id, ccy, add_on in CURVE_DEFS:
         for d in bizdays:
-            base = BASE_RATES[ccy] + rng.gauss(0.0, 0.0005)
+            base = BASE_RATES[ccy] + add_on + rng.gauss(0.0, 0.0005)
             for tenor, yrs in TENORS:
-                curves.append({"date": d.isoformat(), "currency": ccy, "tenor": tenor,
+                curves.append({"date": d.isoformat(), "curve_id": curve_id, "tenor": tenor,
                                "tenor_years": yrs,
                                "zero_rate": base + 0.0005 * yrs + rng.gauss(0.0, 0.0001)})
     vols = [{"instrument_id": i["instrument_id"],
              "atm_vol_30d": round(rng.uniform(0.18, 0.35), 6)}
             for i in instruments if i["type"] in ("EQUITY", "ETF", "FUND")]
-    spreads = [{"instrument_id": i["instrument_id"],
-                "spread": round(rng.uniform(0.002, 0.02), 6)}
+    # Credit lives in ISSUER/RATING curves; residual basis is zero.
+    spreads = [{"instrument_id": i["instrument_id"], "spread": 0.0}
                for i in instruments if i["type"] in ("GOV_BOND", "CORP_BOND")]
     dividends = [{"instrument_id": i["instrument_id"],
                   "dividend_yield": round(rng.uniform(0.0, 0.03), 6)}
@@ -320,7 +339,7 @@ def main() -> int:
     md_dir.mkdir(exist_ok=True)
     for name, cols in [("prices", ("instrument_id", "date", "close", "currency")),
                        ("fx", ("date", "currency", "rate_to_eur")),
-                       ("curves", ("date", "currency", "tenor", "tenor_years", "zero_rate")),
+                       ("curves", ("date", "curve_id", "tenor", "tenor_years", "zero_rate")),
                        ("vols", ("instrument_id", "atm_vol_30d")),
                        ("spreads", ("instrument_id", "spread")),
                        ("dividends", ("instrument_id", "dividend_yield"))]:
@@ -333,7 +352,7 @@ def main() -> int:
     manifest = {
         "generator": "risk-ai/export_fixtures.py",
         "version": "mini-v1",
-        "terms_schema": "universe-v1",
+        "terms_schema": "universe-v2",
         "seed": args.seed,
         "as_of": fic["as_of"],
         "business_days": fic["bizdays"],

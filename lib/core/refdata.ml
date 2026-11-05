@@ -56,7 +56,19 @@ let required_terms = function
         "multiplier";
         "underlying_instrument_id";
       ]
-  | Gov_bond | Corp_bond -> [ "maturity"; "coupon_rate"; "coupon_frequency" ]
+  | Gov_bond | Corp_bond ->
+      [
+        "maturity";
+        "coupon_rate";
+        "coupon_frequency";
+        "country";
+        "issuer";
+        "issuer_rating";
+        "bond_rating";
+        "issue_date";
+        (* par: [par_value] canonical, [notional] accepted as alias — checked
+           in [validate_terms], not here, so exactly one of them is required. *)
+      ]
   | Fx_forward ->
       [
         "settlement_date";
@@ -73,7 +85,18 @@ let validate_terms ty terms =
         invalid_arg
           (Printf.sprintf "%s: missing required term %s"
              (string_of_inst_type ty) k))
-    (required_terms ty)
+    (required_terms ty);
+  (match ty with
+  | Gov_bond | Corp_bond ->
+      let has_par =
+        List.assoc_opt "par_value" terms <> None
+        || List.assoc_opt "notional" terms <> None
+      in
+      if not has_par then
+        invalid_arg
+          (Printf.sprintf "%s: missing required term par_value (or notional)"
+             (string_of_inst_type ty))
+  | _ -> ())
 
 type instrument_record = {
   instrument_id : string;

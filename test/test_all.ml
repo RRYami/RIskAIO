@@ -78,15 +78,57 @@ let test_taxonomy_rejects () =
    with
   | None -> ()
   | Some _ -> Alcotest.fail "accepted unknown instrument type");
-  match
-    try
-      Some
-        (Refdata.validate_terms Refdata.Listed_option
-           [ ("strike", `Float 100.) ])
-    with Invalid_argument _ -> None
-  with
+  (match
+     try
+       Some
+         (Refdata.validate_terms Refdata.Listed_option
+            [ ("strike", `Float 100.) ])
+     with Invalid_argument _ -> None
+   with
   | None -> ()
-  | Some _ -> Alcotest.fail "accepted option terms without expiry"
+  | Some _ -> Alcotest.fail "accepted option terms without expiry");
+  (* Bonds require the full v2 set: country/issuer/ratings/par/issue_date. *)
+  let gov_base =
+    [
+      ("maturity", `String "2035-06-15");
+      ("coupon_rate", `Float 0.025);
+      ("coupon_frequency", `Int 1);
+      ("country", `String "DE");
+      ("issuer", `String "DE sovereign");
+      ("issuer_rating", `String "AAA");
+      ("bond_rating", `String "AAA");
+      ("par_value", `Float 100.);
+      ("issue_date", `String "2020-06-15");
+    ]
+  in
+  Refdata.validate_terms Refdata.Gov_bond gov_base;
+  (* notional is an accepted alias for par_value *)
+  let no_par =
+    List.filter (fun (k, _) -> k <> "par_value") gov_base
+    @ [ ("notional", `Float 100.) ]
+  in
+  Refdata.validate_terms Refdata.Gov_bond no_par;
+  List.iter
+    (fun drop ->
+      match
+        try
+          Some
+            (Refdata.validate_terms Refdata.Gov_bond
+               (List.filter (fun (k, _) -> k <> drop) gov_base))
+        with Invalid_argument _ -> None
+      with
+      | None -> ()
+      | Some _ -> Alcotest.fail ("accepted gov bond without " ^ drop))
+    [ "country"; "issuer"; "issuer_rating"; "bond_rating"; "issue_date" ];
+  (match
+     try
+       Some
+         (Refdata.validate_terms Refdata.Corp_bond
+            (List.filter (fun (k, _) -> k <> "par_value") gov_base))
+     with Invalid_argument _ -> None
+   with
+  | None -> ()
+  | Some _ -> Alcotest.fail "accepted bond without par_value/notional")
 
 (* --- calendar --- *)
 
@@ -380,7 +422,7 @@ let db_curve_tuples () =
         (fun i (tenor, ty) ->
           {
             Risk_db.Db.date;
-            currency = "USD";
+            curve_id = "SWAP:USD";
             tenor;
             tenor_years = ty;
             zero_rate = 0.03 +. (float_of_int i *. 0.001);
@@ -427,7 +469,7 @@ let test_db_contract_ok () =
   let bundle = db_test_bundle () in
   let as_of = Calendar.of_string "2024-08-22" in
   let state = Market.market_state bundle as_of in
-  let usd = List.assoc "USD" state.Market.curves in
+  let usd = List.assoc "SWAP:USD" state.Market.curves in
   Alcotest.check Alcotest.bool "usd-sloped" true
     (usd.(0) < usd.(Array.length usd - 1));
   Alcotest.check eps "dividend" 0.015 (List.assoc "EQ1" state.Market.dividends);
@@ -449,6 +491,306 @@ let test_db_contract_grid_reject () =
   with
   | None -> ()
   | Some _ -> Alcotest.fail "accepted gappy curve grid"
+
+(* --- bond curves (issuer/rating/gov) --- *)
+
+let bond_test_grid curve_id base =
+  List.map
+    (fun (tenor, yrs) ->
+      {
+        Marketdata.date = Calendar.of_string "2024-08-22";
+        curve_id;
+        tenor;
+        tenor_years = yrs;
+        zero_rate = base +. (0.0005 *. yrs);
+      })
+    Marketdata.tenors
+
+let bond_test_state ?(with_issuer = true) () =
+  let as_of = Calendar.of_string "2024-08-22" in
+  let curves =
+    bond_test_grid "SWAP:EUR" 0.02
+    @ bond_test_grid "SWAP:USD" 0.035
+    @ bond_test_grid "GOV:DE:EUR" 0.0202
+    @ bond_test_grid "RATING:BBB:USD" 0.047
+    @ (if with_issuer then bond_test_grid "ISSUER:US energy co 0:USD" 0.05 else [])
+  in
+  let bundle : Marketdata.bundle =
+    {
+      prices =
+        [
+          {
+            Marketdata.instrument_id = "DUMMY";
+            date = as_of;
+            close = Money.decimal_of_string "100.00";
+            currency = "EUR";
+          };
+        ];
+      fx =
+        [
+          {
+            date = as_of;
+            currency = "EUR";
+            rate_to_eur = Money.decimal_of_string "1.0";
+          };
+          {
+            date = as_of;
+            currency = "USD";
+            rate_to_eur = Money.decimal_of_string "0.9";
+          };
+        ];
+      curves;
+      vols = [];
+      spreads = [];
+      dividends = [];
+    }
+  in
+  Market.market_state bundle as_of
+
+let bond_inst iid ty ccy terms : Refdata.instrument_record =
+  {
+    instrument_id = iid;
+    inst_type = ty;
+    currency = ccy;
+    terms;
+    overlay = false;
+    base_instrument_id = None;
+  }
+
+let gov_terms () =
+  [
+    ("maturity", `String "2035-06-15");
+    ("coupon_rate", `Float 0.025);
+    ("coupon_frequency", `Int 1);
+    ("country", `String "DE");
+    ("issuer", `String "DE sovereign");
+    ("issuer_rating", `String "AAA");
+    ("bond_rating", `String "AAA");
+    ("par_value", `Float 100.);
+    ("issue_date", `String "2020-06-15");
+  ]
+
+let corp_terms () =
+  [
+    ("maturity", `String "2030-03-01");
+    ("coupon_rate", `Float 0.045);
+    ("coupon_frequency", `Int 2);
+    ("country", `String "US");
+    ("issuer", `String "US energy co 0");
+    ("issuer_rating", `String "BBB");
+    ("bond_rating", `String "BBB");
+    ("par_value", `Float 100.);
+    ("issue_date", `String "2020-03-01");
+  ]
+
+let holding iid qty : Holdings.holding_row =
+  {
+    Holdings.instrument_id = iid;
+    quantity = Money.decimal_of_string qty;
+    market_value_local = Money.decimal_of_string "0";
+    currency = "";
+    price = None;
+    raw_identifier = "";
+    raw_identifier_type = "";
+  }
+
+let test_bond_gov_curve () =
+  let state = bond_test_state () in
+  let inst = bond_inst "GOV1" Refdata.Gov_bond "EUR" (gov_terms ()) in
+  let book =
+    Pricing.build_book [ holding "GOV1" "10" ] [ ("GOV1", inst) ] state "EUR"
+      None
+  in
+  match book.Pricing.bonds with
+  | [ b ] ->
+      Alcotest.check Alcotest.string "gov-curve" "GOV:DE:EUR" b.Pricing.curve;
+      Alcotest.check (Alcotest.float 1e-12) "gov-face" 1000. b.Pricing.face
+  | _ -> Alcotest.fail "expected one gov bond"
+
+let test_bond_issuer_preferred () =
+  let state = bond_test_state () in
+  let inst = bond_inst "C1" Refdata.Corp_bond "USD" (corp_terms ()) in
+  let book =
+    Pricing.build_book [ holding "C1" "5" ] [ ("C1", inst) ] state "EUR" None
+  in
+  match book.Pricing.bonds with
+  | [ b ] ->
+      Alcotest.check Alcotest.string "issuer-curve"
+        "ISSUER:US energy co 0:USD" b.Pricing.curve;
+      Alcotest.check (Alcotest.float 1e-12) "corp-face" 500. b.Pricing.face
+  | _ -> Alcotest.fail "expected one corp bond"
+
+let test_bond_rating_fallback () =
+  let state = bond_test_state ~with_issuer:false () in
+  let inst = bond_inst "C1" Refdata.Corp_bond "USD" (corp_terms ()) in
+  let book =
+    Pricing.build_book [ holding "C1" "5" ] [ ("C1", inst) ] state "EUR" None
+  in
+  match book.Pricing.bonds with
+  | [ b ] ->
+      Alcotest.check Alcotest.string "rating-curve" "RATING:BBB:USD"
+        b.Pricing.curve
+  | _ -> Alcotest.fail "expected one corp bond"
+
+let test_bond_no_curve_fails () =
+  let as_of = Calendar.of_string "2024-08-22" in
+  let bundle : Marketdata.bundle =
+    {
+      prices =
+        [
+          {
+            Marketdata.instrument_id = "DUMMY";
+            date = as_of;
+            close = Money.decimal_of_string "100.00";
+            currency = "EUR";
+          };
+        ];
+      fx =
+        [
+          {
+            date = as_of;
+            currency = "EUR";
+            rate_to_eur = Money.decimal_of_string "1.0";
+          };
+          {
+            date = as_of;
+            currency = "USD";
+            rate_to_eur = Money.decimal_of_string "0.9";
+          };
+        ];
+      curves = bond_test_grid "SWAP:USD" 0.035;
+      vols = [];
+      spreads = [];
+      dividends = [];
+    }
+  in
+  let state = Market.market_state bundle as_of in
+  let inst = bond_inst "C1" Refdata.Corp_bond "USD" (corp_terms ()) in
+  match
+    try
+      Some
+        (Pricing.build_book [ holding "C1" "5" ] [ ("C1", inst) ] state "EUR"
+           None)
+    with Pricing.Book_error _ -> None
+  with
+  | None -> ()
+  | Some _ -> Alcotest.fail "accepted corp bond with no issuer/rating curve"
+
+let test_bond_gov_uses_gov_not_swap () =
+  (* Same 5y zero-coupon economics on GOV vs SWAP must differ when the
+     curves differ — i.e. pricing reads the gov curve, not the ccy curve. *)
+  let state = bond_test_state () in
+  let gov_grid = List.assoc "GOV:DE:EUR" state.Market.curves in
+  let swap_grid = List.assoc "SWAP:EUR" state.Market.curves in
+  let w = (Market.interp_weights [| 5. |]).(0) in
+  let z_of grid =
+    let acc = ref 0. in
+    Array.iteri (fun i x -> acc := !acc +. (x *. w.(i))) grid;
+    !acc
+  in
+  let zg, zs = (z_of gov_grid, z_of swap_grid) in
+  Alcotest.check Alcotest.bool "curves-differ" true
+    (abs_float (zg -. zs) > 1e-9);
+  let inst = bond_inst "GOV1" Refdata.Gov_bond "EUR" (gov_terms ()) in
+  let book =
+    Pricing.build_book [ holding "GOV1" "1" ] [ ("GOV1", inst) ] state "EUR"
+      None
+  in
+  let b = List.hd book.Pricing.bonds in
+  Alcotest.check Alcotest.string "uses-gov" "GOV:DE:EUR" b.Pricing.curve
+
+let test_bond_ytm_par () =
+  (* 5y annual 5% par bond: price=1 ⇒ YTM=5%, Mac<5, Mod=Mac/1.05, conv>0. *)
+  let times = [| 1.; 2.; 3.; 4.; 5. |] in
+  let cfs = [| 0.05; 0.05; 0.05; 0.05; 1.05 |] in
+  let y = Pricing.bond_ytm times cfs 1 1. in
+  Alcotest.check (Alcotest.float 1e-9) "ytm-par" 0.05 y;
+  let mac, modv, conv = Pricing.bond_mac_mod_conv times cfs 1 y in
+  Alcotest.check Alcotest.bool "mac-range" true (mac > 4. && mac < 5.);
+  Alcotest.check (Alcotest.float 1e-9) "mod" (mac /. 1.05) modv;
+  Alcotest.check Alcotest.bool "conv-pos" true (conv > 0.);
+  (* roundtrip: price at solved y must be par *)
+  Alcotest.check (Alcotest.float 1e-9)
+    "price-roundtrip" 1.
+    (Pricing.bond_price_at_y times cfs 1 y)
+
+let test_bond_ytm_zero () =
+  (* 5y zero: P=1/(1+y)^5 ⇒ y=P^(-1/5)-1; Mac=5, Mod=5/(1+y). *)
+  let times = [| 5. |] and cfs = [| 1. |] in
+  let target = 1. /. (1.04 ** 5.) in
+  let y = Pricing.bond_ytm times cfs 1 target in
+  Alcotest.check (Alcotest.float 1e-9) "ytm-zero" 0.04 y;
+  let mac, modv, conv = Pricing.bond_mac_mod_conv times cfs 1 y in
+  Alcotest.check (Alcotest.float 1e-9) "mac-zero" 5. mac;
+  Alcotest.check (Alcotest.float 1e-9) "mod-zero" (5. /. 1.04) modv;
+  Alcotest.check Alcotest.bool "conv-zero-pos" true (conv > 0.)
+
+let test_bond_ytm_fixtures () =
+  (* Engine YTM must match independent periodic solve on local PV. *)
+  let state = bond_test_state () in
+  let gov = bond_inst "GOV1" Refdata.Gov_bond "EUR" (gov_terms ()) in
+  let corp = bond_inst "C1" Refdata.Corp_bond "USD" (corp_terms ()) in
+  let book =
+    Pricing.build_book [ holding "GOV1" "10"; holding "C1" "5" ]
+      [ ("GOV1", gov); ("C1", corp) ]
+      state "EUR" None
+  in
+  let curve_ids = Pricing.curve_ids book in
+  let ir_names =
+    List.concat_map
+      (fun cid ->
+        List.map
+          (fun (tenor, _) -> "IR:" ^ cid ^ ":" ^ tenor)
+          Marketdata.tenors)
+      curve_ids
+  in
+  let names = Array.of_list ([ "FX:USD" ] @ ir_names) in
+  let factors : Market.factor_set =
+    {
+      names;
+      index = List.mapi (fun i n -> (n, i)) (Array.to_list names);
+      history = [||];
+      return_dates = [||];
+    }
+  in
+  let pricer =
+    {
+      Pricing.book;
+      state;
+      factors;
+      n_pos = 2;
+      lin_pos = [||];
+      lin_f = [||];
+      lin_v0 = [||];
+      pos_ccy = [| "EUR"; "USD" |];
+      fut_f0 = [||];
+      fx_ccys = [ "EUR"; "USD" ];
+      rolled = Hashtbl.create 0;
+    }
+  in
+  let e = Pricing.exposures pricer in
+  List.iter
+    (fun (b : Pricing.bond_spec) ->
+      let y = e.Pricing.ytm.(b.pos) in
+      Alcotest.check Alcotest.bool "ytm-finite" true (Float.is_finite y);
+      Alcotest.check Alcotest.bool "mac-range" true
+        (e.Pricing.mac.(b.pos) > 0.
+        && e.Pricing.mac.(b.pos) < 30.);
+      Alcotest.check Alcotest.bool "mod-lt-mac" true
+        (e.Pricing.mod_ytm.(b.pos) <= e.Pricing.mac.(b.pos));
+      Alcotest.check Alcotest.bool "conv-pos" true
+        (e.Pricing.convexity.(b.pos) > 0.);
+      Alcotest.check Alcotest.bool "conv-eff-pos" true
+        (e.Pricing.convexity_eff.(b.pos) > 0.);
+      (* YTM price must reproduce the engine local PV *)
+      let fx_ccy = List.assoc b.currency state.Market.fx in
+      let base_fx = List.assoc "EUR" state.Market.fx in
+      let target =
+        e.Pricing.market_value.(b.pos) *. base_fx /. (b.face *. fx_ccy)
+      in
+      Alcotest.check (Alcotest.float 1e-9) "ytm-roundtrip" target
+        (Pricing.bond_price_at_y b.times b.cashflows b.freq y))
+    book.Pricing.bonds
 
 (* --- pricing scratch reuse (P7d regression) --- *)
 
@@ -1238,7 +1580,7 @@ let e2e_bundle ~n_days ~seed =
           (fun (tenor, yrs) ->
             {
               date = Risk_core.Calendar.of_string d;
-              currency = "EUR";
+              curve_id = "SWAP:EUR";
               tenor;
               tenor_years = yrs;
               zero_rate = 0.02;
@@ -1818,6 +2160,18 @@ let () =
         [
           Alcotest.test_case "contract-ok" `Quick test_db_contract_ok;
           Alcotest.test_case "grid-reject" `Quick test_db_contract_grid_reject;
+        ] );
+      ( "bonds",
+        [
+          Alcotest.test_case "gov-curve" `Quick test_bond_gov_curve;
+          Alcotest.test_case "issuer-preferred" `Quick
+            test_bond_issuer_preferred;
+          Alcotest.test_case "rating-fallback" `Quick test_bond_rating_fallback;
+          Alcotest.test_case "no-curve-fails" `Quick test_bond_no_curve_fails;
+          Alcotest.test_case "gov-not-swap" `Quick test_bond_gov_uses_gov_not_swap;
+          Alcotest.test_case "ytm-par" `Quick test_bond_ytm_par;
+          Alcotest.test_case "ytm-zero" `Quick test_bond_ytm_zero;
+          Alcotest.test_case "ytm-fixtures" `Quick test_bond_ytm_fixtures;
         ] );
       ("pricing", [ Alcotest.test_case "ws-reuse" `Quick test_ws_reuse ]);
       ( "api",

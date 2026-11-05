@@ -66,16 +66,16 @@ let estimate_cov (config : Config.run_config) returns =
   | Config.Ewma -> Stats.ewma_covariance returns config.ewma_lambda
   | Config.Sample -> Stats.sample_covariance returns
 
-(** Replace each currency's 12 tenor factors by top-k principal components. *)
+(** Replace each curve's 12 tenor factors by top-k principal components. *)
 let pca_curves (factors : Market.factor_set) k estimate =
   let ir_cols : (string * int array) list =
     let by_ccy = Hashtbl.create 4 in
     Array.iteri
       (fun j name ->
         if String.length name > 3 && String.sub name 0 3 = "IR:" then
-          let ccy = List.nth (String.split_on_char ':' name) 1 in
-          Hashtbl.replace by_ccy ccy
-            (j :: (Hashtbl.find_opt by_ccy ccy |> Option.value ~default:[])))
+          let cid, _ = Market.split_ir name in
+          Hashtbl.replace by_ccy cid
+            (j :: (Hashtbl.find_opt by_ccy cid |> Option.value ~default:[])))
       factors.names;
     Hashtbl.fold
       (fun ccy js acc -> (ccy, Array.of_list (List.sort Int.compare js)) :: acc)
@@ -500,11 +500,13 @@ let vol_sigmas (pricer : Pricing.pricer) (factors : Market.factor_set)
                         Market.eq pricer.Pricing.factors o.Pricing.underlying
                       in
                       let s = s0 *. exp (shocks.(r).(eq_j) *. scale) in
-                      let grid =
-                        List.assoc o.Pricing.currency
-                          pricer.Pricing.state.Market.curves
+                      let cid = Pricing.swap_curve_id o.Pricing.currency in
+                      let grid = Pricing.find_curve_grid pricer.Pricing.state cid in
+                      let cols =
+                        try Market.ir factors cid
+                        with Market.Market_data_error _ ->
+                          Market.ir factors o.Pricing.currency
                       in
-                      let cols = Market.ir factors o.Pricing.currency in
                       let shocked =
                         Array.init (Array.length grid) (fun tt ->
                             grid.(tt) +. (shocks.(r).(cols.(tt)) *. scale))
@@ -726,7 +728,19 @@ let hypothetical (scenario : Config.stress_scenario)
                    && rest = Option.value shock.target ~default:""
               then vec.(j) <- vec.(j) +. Float.log1p shock.size
           | "IR" when shock.kind = Config.Rates ->
-              let ccy = List.hd (String.split_on_char ':' rest) in
+              (* rest = <curve_id>:<tenor>; currency = suffix of curve_id *)
+              let curve_id =
+                match String.rindex_opt rest ':' with
+                | None -> rest
+                | Some i -> String.sub rest 0 i
+              in
+              let ccy =
+                match String.rindex_opt curve_id ':' with
+                | None -> curve_id
+                | Some i ->
+                    String.sub curve_id (i + 1)
+                      (String.length curve_id - i - 1)
+              in
               if
                 shock.scope = Config.All
                 || shock.scope = Config.Currency
@@ -910,7 +924,28 @@ let exposure_rows pricer (book : Pricing.book) =
             slice = meta;
             value = (if mv = 0. then 0. else e.dv01.(i) *. 10_000. /. mv);
             value_currency = None;
-          }))
+          });
+      if
+        p.inst_type = Refdata.Gov_bond || p.inst_type = Refdata.Corp_bond
+      then (
+        let put measure value =
+          if Float.is_finite value then
+            push
+              {
+                view = "exposures";
+                dimension = Some "position";
+                key = Some key;
+                measure;
+                slice = meta;
+                value;
+                value_currency = None;
+              }
+        in
+        put "ytm" e.ytm.(i);
+        put "mac_duration" e.mac.(i);
+        put "mod_duration_ytm" e.mod_ytm.(i);
+        put "convexity" e.convexity.(i);
+        put "convexity_eff" e.convexity_eff.(i)))
     book.positions;
   List.iter
     (fun (ccy, v) ->
@@ -958,7 +993,7 @@ let run_engine (inputs : engine_inputs) (config : Config.run_config)
   let factors =
     Market.build_factors inputs.bundle ~equity_ids:(Pricing.equity_ids book)
       ~fx_ccys:(Pricing.currencies book)
-      ~curve_ccys:(Pricing.curve_currencies book)
+      ~curve_ccys:(Pricing.curve_ids book)
       ~history_days:(Some config.history_days)
   in
   let pricer = Pricing.make_pricer book state factors in
